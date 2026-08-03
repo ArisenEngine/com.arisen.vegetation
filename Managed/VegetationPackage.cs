@@ -1,3 +1,5 @@
+using ArisenEngine.Core.Assets;
+using ArisenEngine.Vegetation.Assets;
 using ArisenKernel.Diagnostics;
 using ArisenKernel.Packages;
 using ArisenKernel.Services;
@@ -6,6 +8,7 @@ namespace ArisenEngine.Vegetation;
 
 public sealed class VegetationPackage : IPackageEntry
 {
+    private VegetationRuntimeAssetCooker? m_RuntimeAssetCooker;
     private VegetationRuntimeDataStore? m_RuntimeData;
     private VegetationQueryService? m_QueryService;
     private VegetationDiagnosticsService? m_Diagnostics;
@@ -13,6 +16,9 @@ public sealed class VegetationPackage : IPackageEntry
 
     public void OnLoad(IServiceRegistry services)
     {
+        IAssetDatabase assetDatabase = services.GetService<IAssetDatabase>();
+        m_RuntimeAssetCooker = new VegetationRuntimeAssetCooker(assetDatabase);
+        services.GetService<IRuntimeAssetCookerRegistry>().RegisterCooker(m_RuntimeAssetCooker);
         var runtimeData = new VegetationRuntimeDataStore();
         var queryService = new VegetationQueryService(runtimeData);
         var diagnostics = new VegetationDiagnosticsService();
@@ -40,6 +46,7 @@ public sealed class VegetationPackage : IPackageEntry
         m_Diagnostics = null;
         m_QueryService = null;
         m_RuntimeData = null;
+        m_RuntimeAssetCooker = null;
         KernelLog.Info("[Vegetation] Runtime package unloaded.");
     }
 }
