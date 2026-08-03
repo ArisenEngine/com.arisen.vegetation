@@ -1,0 +1,6 @@
+{
+  "entry": {
+    "assembly": "Com.Arisen.Vegetation.dll",
+    "class": "ArisenEngine.Vegetation.VegetationPackage"
+  }
+}

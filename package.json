@@ -1,0 +1,25 @@
+{
+  "$schema": "https://arisen.dev/schemas/package-v2.json",
+  "id": "com.arisen.vegetation",
+  "name": "Arisen Vegetation",
+  "version": "1.0.0",
+  "engine": {
+    "minVersion": "0.1.0"
+  },
+  "layer": "domain",
+  "author": "Arisen Team",
+  "description": "Backend-neutral vegetation assets, cluster data, queries, diagnostics, and authoring previews.",
+  "services": {
+    "provides": [
+      "ArisenEngine.Vegetation.IVegetationClusterDataSource",
+      "ArisenEngine.Vegetation.IVegetationQueryService",
+      "ArisenEngine.Vegetation.IVegetationDiagnostics",
+      "ArisenEngine.Vegetation.IVegetationDiagnosticsPublisher",
+      "ArisenEngine.Vegetation.IVegetationAuthoringPreviewService"
+    ],
+    "requires": []
+  },
+  "dependencies": {
+    "com.arisen.resources": "1.0.0"
+  }
+}
