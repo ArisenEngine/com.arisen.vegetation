@@ -159,8 +159,8 @@ internal static class VegetationCookedContainer
         }
 
         var sections = new Dictionary<uint, VegetationCookedSectionDescriptor>(sectionCount);
-        var ranges = new List<(ulong Start, ulong End, uint Type)>(sectionCount);
         uint previousType = 0;
+        ulong expectedOffset = checked((ulong)Align8(directoryEnd));
         for (int index = 0; index < sectionCount; index++)
         {
             ReadOnlySpan<byte> descriptorBytes = bytes.Slice(
@@ -185,7 +185,9 @@ internal static class VegetationCookedContainer
 
             if ((offset & 7) != 0 || offset < checked((ulong)directoryEnd))
             {
-                throw Invalid(context, $"section type '{type}' has invalid or unaligned offset '{offset}'");
+                throw Invalid(
+                    context,
+                    $"section type '{type}' has invalid or unaligned offset '{offset}'");
             }
 
             ulong end;
@@ -204,6 +206,16 @@ internal static class VegetationCookedContainer
             if (end > checked((ulong)bytes.Length))
             {
                 throw Invalid(context, $"section type '{type}' extends beyond the file");
+            }
+
+            if (offset != expectedOffset)
+            {
+                string layoutFailure = offset < expectedOffset
+                    ? "overlaps or precedes the canonical layout"
+                    : "leaves a noncanonical aligned gap";
+                throw Invalid(
+                    context,
+                    $"section type '{type}' offset '{offset}' {layoutFailure}; expected '{expectedOffset}'");
             }
 
             if (count > MaxSectionElementCount ||
@@ -230,28 +242,26 @@ internal static class VegetationCookedContainer
                 sections.Add(type, descriptor);
             }
 
-            if (size > 0)
-            {
-                ranges.Add((offset, end, type));
-            }
-
+            expectedOffset = checked((ulong)Align8(checked((int)end)));
             previousType = type;
         }
 
-        ranges.Sort(static (left, right) => left.Start.CompareTo(right.Start));
-        for (int index = 1; index < ranges.Count; index++)
+        if (expectedOffset != checked((ulong)bytes.Length))
         {
-            if (ranges[index].Start < ranges[index - 1].End)
-            {
-                throw Invalid(
-                    context,
-                    $"sections '{ranges[index - 1].Type}' and '{ranges[index].Type}' overlap");
-            }
+            throw Invalid(
+                context,
+                $"byte length '{bytes.Length}' does not end at canonical aligned offset '{expectedOffset}'");
         }
 
         ulong paddingCursor = checked((ulong)directoryEnd);
-        foreach ((ulong start, ulong end, _) in ranges)
+        for (int index = 0; index < sectionCount; index++)
         {
+            ReadOnlySpan<byte> descriptorBytes = bytes.Slice(
+                headerSize + (index * SectionDirectoryEntrySize),
+                SectionDirectoryEntrySize);
+            ulong start = BinaryPrimitives.ReadUInt64LittleEndian(descriptorBytes[8..]);
+            ulong size = BinaryPrimitives.ReadUInt64LittleEndian(descriptorBytes[16..]);
+            ulong end = checked(start + size);
             EnsureZero(
                 bytes.Slice(
                     checked((int)paddingCursor),

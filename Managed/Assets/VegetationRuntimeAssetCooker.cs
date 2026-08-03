@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using ArisenEngine.Core.Assets;
 using ArisenEngine.Core.Diagnostics;
 
@@ -17,7 +18,9 @@ public sealed class VegetationRuntimeAssetCooker : IRuntimeAssetCooker
     public IReadOnlyCollection<string> AssetTypes { get; } =
     [
         VegetationAssetTypes.Species,
-        VegetationAssetTypes.Biome
+        VegetationAssetTypes.Biome,
+        VegetationAssetTypes.Cluster,
+        VegetationAssetTypes.InstancePage
     ];
 
     public RuntimeAssetCookerOutput Cook(
@@ -30,6 +33,8 @@ public sealed class VegetationRuntimeAssetCooker : IRuntimeAssetCooker
         {
             VegetationAssetTypes.Species => CookSpecies(context, request),
             VegetationAssetTypes.Biome => CookBiome(context, request),
+            VegetationAssetTypes.Cluster => CookCluster(context, request),
+            VegetationAssetTypes.InstancePage => CookInstancePage(context, request),
             _ => throw new InvalidOperationException(
                 $"[VegetationRuntimeAssetCooker] Unsupported asset type '{request.AssetType}'.")
         };
@@ -89,6 +94,143 @@ public sealed class VegetationRuntimeAssetCooker : IRuntimeAssetCooker
             cooked.Path,
             VegetationBiomeAssetCooker.CookedFormatVersion,
             ToRuntimeDependencies(cooked.Dependencies));
+    }
+
+    private RuntimeAssetCookerOutput CookCluster(
+        RuntimeAssetCookContext context,
+        RuntimeAssetCookRequest request)
+    {
+        using var zone = Profiler.Zone("Vegetation.CookClusterAsset");
+        ValidateVariant(request, VegetationClusterAssetCooker.RuntimeVariant);
+        ValidateOwnership(request, VegetationAssetTypes.Cluster);
+        var clusterRef = new AssetRef<VegetationClusterSourceAsset>(
+            request.Guid,
+            VegetationAssetTypes.Cluster,
+            request.PackageId);
+        lock (VegetationInstancePageAssetCooker.PublicationGate)
+        {
+            if (!VegetationClusterAssetCooker.TryLoadCookedForRuntimeCooking(
+                    m_AssetDatabase,
+                    clusterRef,
+                    out CookedVegetationCluster cluster,
+                    out string diagnostic))
+            {
+                throw new InvalidOperationException(diagnostic);
+            }
+
+            VegetationClusterAssetCooker.ValidateAuthoredBiomeSpecies(
+                m_AssetDatabase,
+                cluster);
+            CookedAssetRecord artifact = GetCurrentArtifact(
+                request.Guid,
+                VegetationAssetTypes.Cluster,
+                VegetationClusterAssetCooker.RuntimeVariant);
+            string snapshotPath = PinGeneratedArtifact(
+                context,
+                artifact,
+                VegetationClusterAssetCooker.CookedExtension);
+            return RuntimeAssetCookerOutput.FromFile(
+                request,
+                VegetationClusterAssetCooker.RuntimeVariant,
+                BuildOutputRelativePath(
+                    request.PackageId,
+                    request.Guid,
+                    VegetationClusterAssetCooker.RuntimeVariant,
+                    VegetationClusterAssetCooker.CookedExtension),
+                snapshotPath,
+                VegetationClusterAssetCooker.CookedFormatVersion,
+                ToRuntimeDependencies(VegetationClusterAssetCooker.BuildDependencies(cluster)));
+        }
+    }
+
+    private RuntimeAssetCookerOutput CookInstancePage(
+        RuntimeAssetCookContext context,
+        RuntimeAssetCookRequest request)
+    {
+        using var zone = Profiler.Zone("Vegetation.CookInstancePageAsset");
+        ValidateVariant(request, VegetationInstancePageAssetCooker.RuntimeVariant);
+        ValidateOwnership(request, VegetationAssetTypes.InstancePage);
+        var pageRef = new AssetRef<VegetationInstancePageSourceAsset>(
+            request.Guid,
+            VegetationAssetTypes.InstancePage,
+            request.PackageId);
+        lock (VegetationInstancePageAssetCooker.PublicationGate)
+        {
+            if (!VegetationInstancePageAssetCooker.TryLoadCookedForRuntimeCooking(
+                    m_AssetDatabase,
+                    pageRef,
+                    out CookedVegetationInstancePage page,
+                    out string diagnostic))
+            {
+                throw new InvalidOperationException(diagnostic);
+            }
+
+            CookedAssetRecord artifact = GetCurrentArtifact(
+                request.Guid,
+                VegetationAssetTypes.InstancePage,
+                VegetationInstancePageAssetCooker.RuntimeVariant);
+            string snapshotPath = PinGeneratedArtifact(
+                context,
+                artifact,
+                VegetationInstancePageAssetCooker.CookedExtension);
+            return RuntimeAssetCookerOutput.FromFile(
+                request,
+                VegetationInstancePageAssetCooker.RuntimeVariant,
+                BuildOutputRelativePath(
+                    request.PackageId,
+                    request.Guid,
+                    VegetationInstancePageAssetCooker.RuntimeVariant,
+                    VegetationInstancePageAssetCooker.CookedExtension),
+                snapshotPath,
+                VegetationInstancePageAssetCooker.CookedFormatVersion,
+                ToRuntimeDependencies(VegetationInstancePageAssetCooker.BuildDependencies(page)));
+        }
+    }
+
+    private CookedAssetRecord GetCurrentArtifact(
+        Guid guid,
+        string expectedAssetType,
+        string variant)
+    {
+        if (!m_AssetDatabase.TryGetCookedArtifact(guid, variant, out CookedAssetRecord artifact) ||
+            artifact.Guid != guid ||
+            !string.Equals(
+                artifact.AssetType,
+                expectedAssetType,
+                StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(artifact.Variant, variant, StringComparison.Ordinal) ||
+            artifact.SizeInBytes <= 0 ||
+            string.IsNullOrWhiteSpace(artifact.Path))
+        {
+            throw new InvalidOperationException(
+                $"[VegetationRuntimeAssetCooker] {expectedAssetType} '{guid:D}' has no exact " +
+                $"registered '{variant}' artifact.");
+        }
+
+        return artifact;
+    }
+
+    private static string PinGeneratedArtifact(
+        RuntimeAssetCookContext context,
+        CookedAssetRecord artifact,
+        string extension)
+    {
+        byte[] bytes = File.ReadAllBytes(artifact.Path);
+        if (bytes.LongLength != artifact.SizeInBytes)
+        {
+            throw new InvalidOperationException(
+                $"[VegetationRuntimeAssetCooker] Generated artifact '{artifact.Path}' changed size " +
+                "while it was being snapshotted.");
+        }
+
+        string contentHash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        string snapshotPath = Path.Combine(
+            Path.GetFullPath(context.StagingRoot),
+            "VegetationGeneratedSnapshots",
+            artifact.Guid.ToString("N"),
+            $"{artifact.Variant}.{contentHash}{extension}");
+        VegetationCookedContainer.WriteAtomicallyIfChanged(snapshotPath, bytes);
+        return snapshotPath;
     }
 
     private void ValidateOwnership(RuntimeAssetCookRequest request, string expectedAssetType)
