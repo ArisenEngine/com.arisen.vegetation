@@ -162,31 +162,19 @@ public static class VegetationInstancePageAssetCooker
                     $"instance '{index}' has an invalid stable key or species index");
             }
 
-            Vector3 localPosition = CanonicalizePosition(
-                input.LocalPosition,
+            VegetationCookedInstanceInput canonicalInput = CanonicalizeInstanceInput(
+                input,
                 context,
-                $"instance {index} local position");
-            float uniformScale = CanonicalizePositiveFloat(
-                input.UniformScale,
-                context,
-                $"instance {index} uniform scale");
-            float conservativeRadius = CanonicalizePositiveFloat(
-                input.ConservativeRadius,
-                context,
-                $"instance {index} conservative radius");
-            PackedQuaternion packedOrientation = PackQuaternion(
-                input.Orientation,
-                context,
-                $"instance {index} orientation");
+                $"instance {index}");
             uint canonicalSpeciesIndex = remappedSpeciesIndices[input.SpeciesIndex];
             usedSpecies[checked((int)canonicalSpeciesIndex)] = true;
             canonicalInstances[index] = new CookedVegetationInstance(
-                input.StableKey,
+                canonicalInput.StableKey,
                 canonicalSpeciesIndex,
-                localPosition,
-                DecodeQuaternion(packedOrientation),
-                uniformScale,
-                conservativeRadius);
+                canonicalInput.LocalPosition,
+                canonicalInput.Orientation,
+                canonicalInput.UniformScale,
+                canonicalInput.ConservativeRadius);
         }
 
         Array.Sort(
@@ -881,21 +869,16 @@ public static class VegetationInstancePageAssetCooker
         {
             CookedVegetationInstance instance = page.Instances[index];
             Span<byte> record = bytes.AsSpan(index * InstanceStride, InstanceStride);
-            BinaryPrimitives.WriteUInt64LittleEndian(record, instance.StableKey);
-            BinaryPrimitives.WriteUInt32LittleEndian(record[8..], instance.SpeciesIndex);
-            WriteCanonicalFloat(record[12..], instance.LocalPosition.X);
-            WriteCanonicalFloat(record[16..], instance.LocalPosition.Y);
-            WriteCanonicalFloat(record[20..], instance.LocalPosition.Z);
-            PackedQuaternion orientation = PackQuaternion(
+            WriteCanonicalInstanceRecord(
+                record,
+                instance.StableKey,
+                instance.SpeciesIndex,
+                instance.LocalPosition,
                 instance.Orientation,
+                instance.UniformScale,
+                instance.ConservativeRadius,
                 context,
                 $"instance {index} orientation");
-            BinaryPrimitives.WriteInt16LittleEndian(record[24..], orientation.X);
-            BinaryPrimitives.WriteInt16LittleEndian(record[26..], orientation.Y);
-            BinaryPrimitives.WriteInt16LittleEndian(record[28..], orientation.Z);
-            BinaryPrimitives.WriteInt16LittleEndian(record[30..], orientation.W);
-            WriteCanonicalFloat(record[32..], instance.UniformScale);
-            WriteCanonicalFloat(record[36..], instance.ConservativeRadius);
         }
 
         return bytes;
@@ -1157,6 +1140,91 @@ public static class VegetationInstancePageAssetCooker
                 context,
                 "string table contains missing, unused, duplicate, or noncanonical entries");
         }
+    }
+
+    internal static VegetationCookedInstanceInput CanonicalizeInstanceInput(
+        VegetationCookedInstanceInput input,
+        string context,
+        string field)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        Vector3 localPosition = CanonicalizePosition(
+            input.LocalPosition,
+            context,
+            $"{field} local position");
+        float uniformScale = CanonicalizePositiveFloat(
+            input.UniformScale,
+            context,
+            $"{field} uniform scale");
+        float conservativeRadius = CanonicalizePositiveFloat(
+            input.ConservativeRadius,
+            context,
+            $"{field} conservative radius");
+        PackedQuaternion packedOrientation = PackQuaternion(
+            input.Orientation,
+            context,
+            $"{field} orientation");
+        return input with
+        {
+            LocalPosition = localPosition,
+            Orientation = DecodeQuaternion(packedOrientation),
+            UniformScale = uniformScale,
+            ConservativeRadius = conservativeRadius
+        };
+    }
+
+    internal static void WriteCanonicalInstanceRecord(
+        Span<byte> record,
+        VegetationCookedInstanceInput input,
+        string context,
+        string orientationField)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        WriteCanonicalInstanceRecord(
+            record,
+            input.StableKey,
+            checked((uint)input.SpeciesIndex),
+            input.LocalPosition,
+            input.Orientation,
+            input.UniformScale,
+            input.ConservativeRadius,
+            context,
+            orientationField);
+    }
+
+    private static void WriteCanonicalInstanceRecord(
+        Span<byte> record,
+        ulong stableKey,
+        uint speciesIndex,
+        Vector3 localPosition,
+        Quaternion orientationValue,
+        float uniformScale,
+        float conservativeRadius,
+        string context,
+        string orientationField)
+    {
+        if (record.Length != InstanceStride)
+        {
+            throw new ArgumentException(
+                $"Vegetation instance record must be exactly {InstanceStride} bytes.",
+                nameof(record));
+        }
+
+        BinaryPrimitives.WriteUInt64LittleEndian(record, stableKey);
+        BinaryPrimitives.WriteUInt32LittleEndian(record[8..], speciesIndex);
+        WriteCanonicalFloat(record[12..], localPosition.X);
+        WriteCanonicalFloat(record[16..], localPosition.Y);
+        WriteCanonicalFloat(record[20..], localPosition.Z);
+        PackedQuaternion orientation = PackQuaternion(
+            orientationValue,
+            context,
+            orientationField);
+        BinaryPrimitives.WriteInt16LittleEndian(record[24..], orientation.X);
+        BinaryPrimitives.WriteInt16LittleEndian(record[26..], orientation.Y);
+        BinaryPrimitives.WriteInt16LittleEndian(record[28..], orientation.Z);
+        BinaryPrimitives.WriteInt16LittleEndian(record[30..], orientation.W);
+        WriteCanonicalFloat(record[32..], uniformScale);
+        WriteCanonicalFloat(record[36..], conservativeRadius);
     }
 
     private static Vector3 CanonicalizePosition(Vector3 value, string context, string field)
