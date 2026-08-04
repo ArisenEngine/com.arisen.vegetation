@@ -41,6 +41,39 @@ public sealed record CookedVegetationInstancePageArtifact(
     IReadOnlyList<CookedVegetationSpeciesReference> Species,
     IReadOnlyList<VegetationCookedAssetDependency> Dependencies);
 
+public readonly struct VegetationInstancePagePayloadIdentity
+{
+    private readonly byte[]? m_ContentHash;
+
+    internal VegetationInstancePagePayloadIdentity(
+        Guid pageGuid,
+        long sizeInBytes,
+        byte[] contentHash)
+    {
+        if (pageGuid == Guid.Empty ||
+            sizeInBytes <= 0 ||
+            contentHash is not { Length: VegetationCookedContainer.HashSize })
+        {
+            throw new ArgumentException("Vegetation instance-page payload identity is invalid.");
+        }
+
+        PageGuid = pageGuid;
+        SizeInBytes = sizeInBytes;
+        m_ContentHash = contentHash;
+    }
+
+    public Guid PageGuid { get; }
+
+    public long SizeInBytes { get; }
+
+    public ReadOnlySpan<byte> ContentHash => m_ContentHash;
+
+    public bool IsValid =>
+        PageGuid != Guid.Empty &&
+        SizeInBytes > 0 &&
+        m_ContentHash is { Length: VegetationCookedContainer.HashSize };
+}
+
 public sealed record CookedVegetationClusterArtifact(
     Guid ClusterGuid,
     string PackageId,

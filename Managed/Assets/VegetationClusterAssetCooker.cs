@@ -1035,12 +1035,13 @@ public static class VegetationClusterAssetCooker
                         reference.PackageId),
                     cluster.Guid,
                     out CookedVegetationInstancePage page,
+                    out VegetationInstancePagePayloadIdentity payloadIdentity,
                     out string pageDiagnostic))
             {
                 throw new InvalidOperationException(pageDiagnostic);
             }
 
-            ValidateLoadedPageReference(assetDatabase, reference, page);
+            ValidateLoadedPageReference(reference, page, payloadIdentity);
             if (page.GeneratedSchemaVersion != cluster.GeneratedSchemaVersion)
             {
                 throw new InvalidOperationException(
@@ -1099,9 +1100,9 @@ public static class VegetationClusterAssetCooker
     }
 
     private static void ValidateLoadedPageReference(
-        IAssetDatabase assetDatabase,
         CookedVegetationInstancePageReference reference,
-        CookedVegetationInstancePage page)
+        CookedVegetationInstancePage page,
+        VegetationInstancePagePayloadIdentity payloadIdentity)
     {
         if (page.Guid != reference.Guid ||
             !string.Equals(page.PackageId, reference.PackageId, StringComparison.Ordinal) ||
@@ -1114,7 +1115,15 @@ public static class VegetationClusterAssetCooker
                 "the cluster reference.");
         }
 
-        ValidateExactPageArtifactBytes(assetDatabase, reference, expectedPayload: null);
+        if (!payloadIdentity.IsValid ||
+            payloadIdentity.PageGuid != reference.Guid ||
+            payloadIdentity.SizeInBytes != reference.SizeInBytes ||
+            !payloadIdentity.ContentHash.SequenceEqual(reference.ContentHash))
+        {
+            throw new InvalidOperationException(
+                $"[VegetationClusterAssetCooker] Loaded page '{reference.Guid:D}' byte size or " +
+                "full-file SHA-256 does not match the cluster reference.");
+        }
     }
 
     private static void ValidateExactPageArtifactBytes(

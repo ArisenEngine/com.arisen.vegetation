@@ -166,6 +166,17 @@ public static class VegetationSpeciesAssetCooker
         }
     }
 
+    internal static CookedVegetationSpecies LoadSourceForDependencyDiscovery(
+        IAssetDatabase assetDatabase,
+        AssetRef<VegetationSpeciesSourceAsset> speciesRef)
+    {
+        ArgumentNullException.ThrowIfNull(assetDatabase);
+        VegetationSpeciesSourceDescriptor source =
+            VegetationSpeciesSourceAssetLoader.LoadSource(assetDatabase, speciesRef);
+        ValidateSourceDependencies(assetDatabase, source);
+        return BuildSpecies(source);
+    }
+
     internal static byte[] WritePayload(CookedVegetationSpecies species)
     {
         ArgumentNullException.ThrowIfNull(species);

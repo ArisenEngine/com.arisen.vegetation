@@ -256,6 +256,39 @@ public static class VegetationInstancePageAssetCooker
     public static bool TryLoadCooked(
         IAssetDatabase assetDatabase,
         AssetRef<VegetationInstancePageSourceAsset> pageRef,
+        out CookedVegetationInstancePage page,
+        out string diagnostic)
+    {
+        return TryLoadCookedCore(
+            assetDatabase,
+            pageRef,
+            expectedClusterGuid: null,
+            validateSpeciesAvailability: true,
+            out page,
+            out _,
+            out diagnostic);
+    }
+
+    public static bool TryLoadCooked(
+        IAssetDatabase assetDatabase,
+        AssetRef<VegetationInstancePageSourceAsset> pageRef,
+        out CookedVegetationInstancePage page,
+        out VegetationInstancePagePayloadIdentity payloadIdentity,
+        out string diagnostic)
+    {
+        return TryLoadCookedCore(
+            assetDatabase,
+            pageRef,
+            expectedClusterGuid: null,
+            validateSpeciesAvailability: true,
+            out page,
+            out payloadIdentity,
+            out diagnostic);
+    }
+
+    public static bool TryLoadCooked(
+        IAssetDatabase assetDatabase,
+        AssetRef<VegetationInstancePageSourceAsset> pageRef,
         Guid expectedClusterGuid,
         out CookedVegetationInstancePage page,
         out string diagnostic)
@@ -274,6 +307,7 @@ public static class VegetationInstancePageAssetCooker
             expectedClusterGuid,
             validateSpeciesAvailability: true,
             out page,
+            out _,
             out diagnostic);
     }
 
@@ -284,9 +318,27 @@ public static class VegetationInstancePageAssetCooker
         out CookedVegetationInstancePage page,
         out string diagnostic)
     {
+        return TryLoadCookedForCluster(
+            assetDatabase,
+            pageRef,
+            expectedClusterGuid,
+            out page,
+            out _,
+            out diagnostic);
+    }
+
+    internal static bool TryLoadCookedForCluster(
+        IAssetDatabase assetDatabase,
+        AssetRef<VegetationInstancePageSourceAsset> pageRef,
+        Guid expectedClusterGuid,
+        out CookedVegetationInstancePage page,
+        out VegetationInstancePagePayloadIdentity payloadIdentity,
+        out string diagnostic)
+    {
         if (expectedClusterGuid == Guid.Empty)
         {
             page = null!;
+            payloadIdentity = default;
             diagnostic =
                 "[VegetationInstancePageAssetCooker] Expected cluster GUID is empty.";
             return false;
@@ -298,6 +350,7 @@ public static class VegetationInstancePageAssetCooker
             expectedClusterGuid,
             validateSpeciesAvailability: false,
             out page,
+            out payloadIdentity,
             out diagnostic);
     }
 
@@ -313,6 +366,7 @@ public static class VegetationInstancePageAssetCooker
             expectedClusterGuid: null,
             validateSpeciesAvailability: false,
             out page,
+            out _,
             out diagnostic);
     }
 
@@ -322,10 +376,12 @@ public static class VegetationInstancePageAssetCooker
         Guid? expectedClusterGuid,
         bool validateSpeciesAvailability,
         out CookedVegetationInstancePage page,
+        out VegetationInstancePagePayloadIdentity payloadIdentity,
         out string diagnostic)
     {
         ArgumentNullException.ThrowIfNull(assetDatabase);
         page = null!;
+        payloadIdentity = default;
         if (!pageRef.IsValid)
         {
             diagnostic = "[VegetationInstancePageAssetCooker] Cooked instance-page ref is empty.";
@@ -441,6 +497,10 @@ public static class VegetationInstancePageAssetCooker
                     ValidateCookedSpeciesAvailability(assetDatabase, page, diagnosticPath);
                 }
 
+                payloadIdentity = new VegetationInstancePagePayloadIdentity(
+                    page.Guid,
+                    payload.Length,
+                    SHA256.HashData(payload.Span));
                 return true;
             }
             catch (InvalidOperationException ex)
