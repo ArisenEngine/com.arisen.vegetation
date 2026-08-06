@@ -6,6 +6,7 @@ public static class VegetationAssetTypes
 {
     public const string Species = "VegetationSpecies";
     public const string Biome = "VegetationBiome";
+    public const string ScatterRecipe = "VegetationScatterRecipe";
     public const string Cluster = "VegetationCluster";
     public const string InstancePage = "VegetationInstancePage";
 }
@@ -18,6 +19,11 @@ public sealed class VegetationSpeciesSourceAsset
 public sealed class VegetationBiomeSourceAsset
 {
     private VegetationBiomeSourceAsset() { }
+}
+
+public sealed class VegetationScatterRecipeSourceAsset
+{
+    private VegetationScatterRecipeSourceAsset() { }
 }
 
 public sealed class VegetationClusterSourceAsset

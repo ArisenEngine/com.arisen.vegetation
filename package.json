@@ -12,6 +12,7 @@
   "services": {
     "provides": [
       "ArisenEngine.Vegetation.IVegetationClusterDataSource",
+      "ArisenEngine.Vegetation.IVegetationClusterRenderSource",
       "ArisenEngine.Vegetation.IVegetationRuntimeDataStore",
       "ArisenEngine.Vegetation.IVegetationQueryService",
       "ArisenEngine.Vegetation.IVegetationDiagnostics",
@@ -20,6 +21,7 @@
     ],
     "requires": [
       "ArisenEngine.Core.Assets.IAssetDatabase",
+      "ArisenEngine.Core.Assets.IAssetSourceIndex",
       "ArisenEngine.Core.Assets.IRuntimeAssetCookerRegistry",
       "ArisenEngine.Resources.Serialization.ISceneComponentExtensionRegistry",
       "ArisenEngine.Resources.Serialization.IRuntimeSceneService"

@@ -1,4 +1,5 @@
 using ArisenEngine.Core.Assets;
+using ArisenEngine.Core.ECS;
 using ArisenEngine.Resources.Serialization;
 using ArisenEngine.Vegetation.Assets;
 using ArisenKernel.Diagnostics;
@@ -14,6 +15,7 @@ public sealed class VegetationPackage : IPackageEntry
     private VegetationClusterSceneComponentCodec? m_SceneComponentCodec;
     private ISceneComponentExtensionRegistry? m_SceneComponentRegistry;
     private IRuntimeSceneService? m_RuntimeSceneService;
+    private VegetationClusterRenderSource? m_RenderSource;
     private VegetationRuntimeDataStore? m_RuntimeData;
     private VegetationQueryService? m_QueryService;
     private VegetationDiagnosticsService? m_Diagnostics;
@@ -27,6 +29,7 @@ public sealed class VegetationPackage : IPackageEntry
         m_SceneComponentCodec != null ||
         m_SceneComponentRegistry != null ||
         m_RuntimeSceneService != null ||
+        m_RenderSource != null ||
         m_RuntimeData != null ||
         m_QueryService != null ||
         m_Diagnostics != null ||
@@ -50,15 +53,25 @@ public sealed class VegetationPackage : IPackageEntry
         IRuntimeSceneService runtimeSceneService =
             services.GetService<IRuntimeSceneService>();
 
+        if (assetDatabase.SourceAccessMode == AssetSourceAccessMode.RuntimeAssetCook)
+        {
+            VegetationScatterRecipeGenerator.GenerateAll(
+                assetDatabase,
+                services.GetService<IAssetSourceIndex>());
+        }
+
         m_RuntimeAssetCooker = new VegetationRuntimeAssetCooker(assetDatabase);
         m_RuntimeAssetCookerRegistry = cookerRegistry;
         m_SceneComponentCodec = new VegetationClusterSceneComponentCodec();
         m_SceneComponentRegistry = sceneComponentRegistry;
         m_RuntimeSceneService = runtimeSceneService;
+        Func<EntityManager?> entityManagerProvider =
+            () => runtimeSceneService.ActiveScene?.EntityManager;
+        m_RenderSource = new VegetationClusterRenderSource(entityManagerProvider);
         m_RuntimeData = new VegetationRuntimeDataStore();
         m_QueryService = new VegetationQueryService(
             m_RuntimeData,
-            () => runtimeSceneService.ActiveScene?.EntityManager);
+            entityManagerProvider);
         m_Diagnostics = new VegetationDiagnosticsService();
         m_AuthoringPreviews = new VegetationAuthoringPreviewService();
         m_RuntimeAssetCookerRegistered = false;
@@ -72,6 +85,7 @@ public sealed class VegetationPackage : IPackageEntry
             sceneComponentRegistry.Register(m_SceneComponentCodec);
 
             services.RegisterService<IVegetationClusterDataSource>(m_RuntimeData);
+            services.RegisterService<IVegetationClusterRenderSource>(m_RenderSource);
             services.RegisterService<IVegetationRuntimeDataStore>(m_RuntimeData);
             services.RegisterService<IVegetationQueryService>(m_QueryService);
             services.RegisterService<IVegetationDiagnostics>(m_Diagnostics);
@@ -167,6 +181,11 @@ public sealed class VegetationPackage : IPackageEntry
         if (m_RuntimeData == null)
         {
             m_QueryService = null;
+        }
+
+        m_RenderSource = null;
+        if (m_QueryService == null)
+        {
             m_RuntimeSceneService = null;
         }
 
