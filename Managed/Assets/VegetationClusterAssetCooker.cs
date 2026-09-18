@@ -7,12 +7,20 @@ using ArisenEngine.Resources.Serialization;
 
 namespace ArisenEngine.Vegetation.Assets;
 
+internal sealed record VegetationClusterCookPreparation(
+    CookedVegetationCluster Cluster,
+    byte[] ClusterPayload,
+    IReadOnlyList<CookedVegetationInstancePage> Pages,
+    IReadOnlyList<byte[]> PagePayloads);
+
 internal enum CookedVegetationClusterSectionType : uint
 {
     Metadata = 1,
     Strings = 2,
     Species = 3,
-    Pages = 4
+    Pages = 4,
+    SpatialNodes = 5,
+    SpeciesAcceleration = 6
 }
 
 public static class VegetationClusterAssetCooker
@@ -26,6 +34,8 @@ public static class VegetationClusterAssetCooker
     internal const int MetadataStride = 128;
     internal const int SpeciesStride = 24;
     internal const int PageStride = 144;
+    internal const int SpatialNodeStride = 72;
+    internal const int SpeciesAccelerationStride = 96;
     internal const int MinimumPageCount = 1;
     internal const int MaximumPageCount = 4_096;
     internal const int MaximumSpeciesCount =
@@ -35,7 +45,7 @@ public static class VegetationClusterAssetCooker
     private const int MaxCookedClusterBytes = 4 * 1024 * 1024;
     private const int MaxStringBytes = 16 * 1024;
     private const int MaxStringCount = 2 + MaximumSpeciesCount + MaximumPageCount;
-    private const int MaximumTotalInstanceCount = 1024 * 1024;
+    internal const int MaximumTotalInstanceCount = 1024 * 1024;
 
     private static readonly byte[] s_Magic = Encoding.ASCII.GetBytes("ARIVCLUS");
     private static readonly HashSet<uint> s_KnownSections =
@@ -43,7 +53,9 @@ public static class VegetationClusterAssetCooker
         (uint)CookedVegetationClusterSectionType.Metadata,
         (uint)CookedVegetationClusterSectionType.Strings,
         (uint)CookedVegetationClusterSectionType.Species,
-        (uint)CookedVegetationClusterSectionType.Pages
+        (uint)CookedVegetationClusterSectionType.Pages,
+        (uint)CookedVegetationClusterSectionType.SpatialNodes,
+        (uint)CookedVegetationClusterSectionType.SpeciesAcceleration
     ];
 
     public static CookedVegetationClusterArtifact Cook(
@@ -54,68 +66,22 @@ public static class VegetationClusterAssetCooker
         ArgumentNullException.ThrowIfNull(assetDatabase);
         ArgumentNullException.ThrowIfNull(descriptor);
 
-        ValidateDescriptorOwnership(assetDatabase, descriptor);
-
-        var builtPages = new CookedVegetationInstancePage[descriptor.Pages.Count];
-        for (int index = 0; index < descriptor.Pages.Count; index++)
+        VegetationClusterCookPreparation preparation = Prepare(assetDatabase, descriptor);
+        var preparedPages = new PreparedPage[preparation.Pages.Count];
+        for (int index = 0; index < preparation.Pages.Count; index++)
         {
-            VegetationInstancePageCookDescriptor pageDescriptor = descriptor.Pages[index] ??
-                throw new InvalidOperationException(
-                    $"[VegetationClusterAssetCooker] Cluster '{descriptor.Guid:D}' page descriptor " +
-                    $"'{index}' is null.");
-            builtPages[index] = VegetationInstancePageAssetCooker.BuildForCook(
-                assetDatabase,
-                pageDescriptor);
+            preparedPages[index] = new PreparedPage(
+                preparation.Pages[index],
+                preparation.Cluster.Pages[index]);
         }
-
-        Array.Sort(builtPages, ComparePages);
-        ValidateBuiltPages(assetDatabase, descriptor, builtPages);
-
-        CookedVegetationSpeciesReference[] species = BuildCanonicalSpecies(builtPages);
-        ValidateAuthoredBiomeSpecies(
-            assetDatabase,
-            descriptor.Guid,
-            descriptor.Biome,
-            species);
-        WorldBounds bounds = ComputeBounds(builtPages);
-        int instanceCount = CountInstancesAndValidateStableKeys(builtPages);
-
-        var preparedPages = new PreparedPage[builtPages.Length];
-        var pageReferences = new CookedVegetationInstancePageReference[builtPages.Length];
-        for (int index = 0; index < builtPages.Length; index++)
-        {
-            CookedVegetationInstancePage page = builtPages[index];
-            byte[] pagePayload = VegetationInstancePageAssetCooker.WritePayload(page);
-            byte[] contentHash = SHA256.HashData(pagePayload);
-            var reference = new CookedVegetationInstancePageReference(
-                page.Guid,
-                page.PackageId,
-                page.Instances.Count,
-                page.Origin,
-                page.Bounds,
-                pagePayload.LongLength,
-                contentHash);
-            preparedPages[index] = new PreparedPage(page, reference);
-            pageReferences[index] = reference;
-        }
-
-        var cluster = new CookedVegetationCluster(
-            descriptor.Guid,
-            descriptor.PackageId,
-            descriptor.GeneratedSchemaVersion,
-            descriptor.Biome,
-            bounds,
-            Array.AsReadOnly(species),
-            Array.AsReadOnly(pageReferences),
-            instanceCount);
-        byte[] clusterPayload = WritePayload(cluster);
 
         lock (VegetationInstancePageAssetCooker.PublicationGate)
         {
             // Recheck every immutable child while publication is serialized, before any commit.
-            foreach (PreparedPage prepared in preparedPages)
+            for (int index = 0; index < preparedPages.Length; index++)
             {
-                byte[] payload = VegetationInstancePageAssetCooker.WritePayload(prepared.Page);
+                PreparedPage prepared = preparedPages[index];
+                byte[] payload = preparation.PagePayloads[index];
                 VegetationInstancePageAssetCooker.ValidatePublicationCompatibility(
                     assetDatabase,
                     prepared.Page,
@@ -137,8 +103,81 @@ public static class VegetationClusterAssetCooker
                 ValidatePublishedPage(assetDatabase, prepared, artifact);
             }
 
-            return PublishCluster(assetDatabase, cluster, clusterPayload);
+            return PublishCluster(
+                assetDatabase,
+                preparation.Cluster,
+                preparation.ClusterPayload);
         }
+    }
+
+    internal static VegetationClusterCookPreparation Prepare(
+        IAssetDatabase assetDatabase,
+        VegetationClusterCookDescriptor descriptor)
+    {
+        ArgumentNullException.ThrowIfNull(assetDatabase);
+        ArgumentNullException.ThrowIfNull(descriptor);
+        ValidateDescriptorOwnership(assetDatabase, descriptor);
+
+        var builtPages = new CookedVegetationInstancePage[descriptor.Pages.Count];
+        for (int index = 0; index < descriptor.Pages.Count; index++)
+        {
+            VegetationInstancePageCookDescriptor pageDescriptor = descriptor.Pages[index] ??
+                throw new InvalidOperationException(
+                    $"[VegetationClusterAssetCooker] Cluster '{descriptor.Guid:D}' page descriptor " +
+                    $"'{index}' is null.");
+            builtPages[index] = VegetationInstancePageAssetCooker.BuildForCook(
+                assetDatabase,
+                pageDescriptor);
+        }
+
+        Array.Sort(builtPages, ComparePages);
+        ValidateBuiltPages(assetDatabase, descriptor, builtPages);
+        CookedVegetationSpeciesReference[] species = BuildCanonicalSpecies(builtPages);
+        ValidateAuthoredBiomeSpecies(
+            assetDatabase,
+            descriptor.Guid,
+            descriptor.Biome,
+            species);
+        WorldBounds bounds = ComputeBounds(builtPages);
+        int instanceCount = CountInstancesAndValidateStableKeys(builtPages);
+        var pageReferences = new CookedVegetationInstancePageReference[builtPages.Length];
+        var pagePayloads = new byte[builtPages.Length][];
+        for (int index = 0; index < builtPages.Length; index++)
+        {
+            CookedVegetationInstancePage page = builtPages[index];
+            byte[] pagePayload = VegetationInstancePageAssetCooker.WritePayload(page);
+            pagePayloads[index] = pagePayload;
+            pageReferences[index] = new CookedVegetationInstancePageReference(
+                page.Guid,
+                page.PackageId,
+                page.Instances.Count,
+                page.Origin,
+                page.Bounds,
+                pagePayload.LongLength,
+                SHA256.HashData(pagePayload));
+        }
+
+        var cluster = new CookedVegetationCluster(
+            descriptor.Guid,
+            descriptor.PackageId,
+            descriptor.GeneratedSchemaVersion,
+            descriptor.Biome,
+            bounds,
+            Array.AsReadOnly(species),
+            Array.AsReadOnly(pageReferences),
+            instanceCount);
+        cluster = cluster with
+        {
+            Acceleration = BuildAcceleration(
+                cluster,
+                builtPages,
+                descriptor.SpeciesData)
+        };
+        return new VegetationClusterCookPreparation(
+            cluster,
+            WritePayload(cluster),
+            Array.AsReadOnly(builtPages),
+            Array.AsReadOnly(pagePayloads));
     }
 
     internal static CookedVegetationClusterArtifact Cook(
@@ -319,12 +358,20 @@ public static class VegetationClusterAssetCooker
     internal static byte[] WritePayload(CookedVegetationCluster cluster)
     {
         ArgumentNullException.ThrowIfNull(cluster);
+        cluster = cluster with
+        {
+            Acceleration = cluster.Acceleration ?? BuildAcceleration(cluster, null, null)
+        };
         ValidateCluster(cluster, $"vegetation cluster '{cluster.Guid:D}'");
         string[] strings = BuildCanonicalStrings(cluster);
         Dictionary<string, uint> stringIndices = BuildStringIndices(strings);
         byte[] metadata = BuildMetadataSection(cluster, stringIndices);
         byte[] species = BuildSpeciesSection(cluster, stringIndices);
         byte[] pages = BuildPageSection(cluster, stringIndices);
+        byte[] spatialNodes = BuildSpatialNodeSection(cluster.Acceleration!, $"vegetation cluster '{cluster.Guid:D}'");
+        byte[] speciesAcceleration = BuildSpeciesAccelerationSection(
+            cluster.Acceleration!,
+            $"vegetation cluster '{cluster.Guid:D}'");
         VegetationCookedSectionPayload[] sections =
         [
             new(
@@ -350,7 +397,19 @@ public static class VegetationClusterAssetCooker
                 VegetationCookedSectionFlags.Required,
                 checked((uint)cluster.Pages.Count),
                 PageStride,
-                pages)
+                pages),
+            new(
+                (uint)CookedVegetationClusterSectionType.SpatialNodes,
+                VegetationCookedSectionFlags.None,
+                checked((uint)cluster.Acceleration!.SpatialNodes.Count),
+                SpatialNodeStride,
+                spatialNodes),
+            new(
+                (uint)CookedVegetationClusterSectionType.SpeciesAcceleration,
+                VegetationCookedSectionFlags.None,
+                checked((uint)cluster.Acceleration.Species.Count),
+                SpeciesAccelerationStride,
+                speciesAcceleration)
         ];
 
         byte[] output = VegetationCookedContainer.Build(
@@ -524,6 +583,46 @@ public static class VegetationClusterAssetCooker
             checked((uint)pageCount),
             MaximumPageCount,
             context);
+        VegetationCookedSectionDescriptor? spatialNodesSection = null;
+        VegetationCookedSectionDescriptor? speciesAccelerationSection = null;
+        if (sections.TryGetValue(
+                (uint)CookedVegetationClusterSectionType.SpatialNodes,
+                out VegetationCookedSectionDescriptor encodedSpatialNodes))
+        {
+            if (encodedSpatialNodes.Flags != VegetationCookedSectionFlags.None ||
+                encodedSpatialNodes.Stride != SpatialNodeStride ||
+                encodedSpatialNodes.Count is < 1 or > (MaximumPageCount * 2 - 1))
+            {
+                throw VegetationCookedContainer.Invalid(
+                    context,
+                    "optional spatial-node section has invalid flags, stride, or count");
+            }
+
+            spatialNodesSection = encodedSpatialNodes;
+        }
+
+        if (sections.TryGetValue(
+                (uint)CookedVegetationClusterSectionType.SpeciesAcceleration,
+                out VegetationCookedSectionDescriptor encodedSpeciesAcceleration))
+        {
+            if (encodedSpeciesAcceleration.Flags != VegetationCookedSectionFlags.None ||
+                encodedSpeciesAcceleration.Stride != SpeciesAccelerationStride ||
+                encodedSpeciesAcceleration.Count != checked((uint)speciesCount))
+            {
+                throw VegetationCookedContainer.Invalid(
+                    context,
+                    "optional species-acceleration section has invalid flags, stride, or count");
+            }
+
+            speciesAccelerationSection = encodedSpeciesAcceleration;
+        }
+
+        if (spatialNodesSection.HasValue != speciesAccelerationSection.HasValue)
+        {
+            throw VegetationCookedContainer.Invalid(
+                context,
+                "spatial-node and species-acceleration sections must be published together");
+        }
 
         string[] strings = VegetationCookedContainer.ReadStrings(
             bytes,
@@ -634,6 +733,88 @@ public static class VegetationClusterAssetCooker
             Array.AsReadOnly(species),
             Array.AsReadOnly(pages),
             instanceCount);
+        if (spatialNodesSection.HasValue)
+        {
+            ReadOnlySpan<byte> spatialNodeBytes = VegetationCookedContainer.GetSection(
+                bytes,
+                spatialNodesSection.Value);
+            var spatialNodes = new CookedVegetationSpatialNode[
+                checked((int)spatialNodesSection.Value.Count)];
+            for (int index = 0; index < spatialNodes.Length; index++)
+            {
+                ReadOnlySpan<byte> record = spatialNodeBytes.Slice(
+                    index * SpatialNodeStride,
+                    SpatialNodeStride);
+                spatialNodes[index] = new CookedVegetationSpatialNode(
+                    ReadBounds(record[..48], context, $"spatial node {index} bounds"),
+                    BinaryPrimitives.ReadInt32LittleEndian(record[48..]),
+                    BinaryPrimitives.ReadInt32LittleEndian(record[52..]),
+                    BinaryPrimitives.ReadInt32LittleEndian(record[56..]),
+                    BinaryPrimitives.ReadInt32LittleEndian(record[60..]));
+                VegetationCookedContainer.EnsureZero(
+                    record[64..],
+                    context,
+                    $"spatial node {index} reserved bytes");
+            }
+
+            ReadOnlySpan<byte> speciesAccelerationBytes = VegetationCookedContainer.GetSection(
+                bytes,
+                speciesAccelerationSection!.Value);
+            var speciesAcceleration = new CookedVegetationSpeciesAcceleration[speciesCount];
+            for (int index = 0; index < speciesAcceleration.Length; index++)
+            {
+                ReadOnlySpan<byte> record = speciesAccelerationBytes.Slice(
+                    index * SpeciesAccelerationStride,
+                    SpeciesAccelerationStride);
+                uint speciesIndex = BinaryPrimitives.ReadUInt32LittleEndian(record);
+                uint rawFirstPage = BinaryPrimitives.ReadUInt32LittleEndian(record[4..]);
+                uint rawLastPage = BinaryPrimitives.ReadUInt32LittleEndian(record[8..]);
+                uint rawPageCount = BinaryPrimitives.ReadUInt32LittleEndian(record[12..]);
+                uint rawInstanceCount = BinaryPrimitives.ReadUInt32LittleEndian(record[16..]);
+                if (speciesIndex != (uint)index ||
+                    rawFirstPage > int.MaxValue ||
+                    rawLastPage > int.MaxValue ||
+                    rawPageCount > int.MaxValue ||
+                    rawInstanceCount > int.MaxValue)
+                {
+                    throw VegetationCookedContainer.Invalid(
+                        context,
+                        $"species acceleration '{index}' identity or count is invalid");
+                }
+
+                speciesAcceleration[index] = new CookedVegetationSpeciesAcceleration(
+                    species[index],
+                    checked((int)rawFirstPage),
+                    checked((int)rawLastPage),
+                    checked((int)rawPageCount),
+                    checked((int)rawInstanceCount),
+                    ReadBounds(record[20..68], context, $"species acceleration {index} bounds"),
+                    ReadCanonicalNonNegativeFloat(
+                        record[68..72],
+                        context,
+                        $"species acceleration {index} maximum radius"),
+                    ReadCanonicalNonNegativeFloat(
+                        record[72..76],
+                        context,
+                        $"species acceleration {index} maximum LOD distance"),
+                    ReadCanonicalNonNegativeFloat(
+                        record[76..80],
+                        context,
+                        $"species acceleration {index} maximum LOD screen error"));
+                VegetationCookedContainer.EnsureZero(
+                    record[80..],
+                    context,
+                    $"species acceleration {index} reserved bytes");
+            }
+
+            cluster = cluster with
+            {
+                Acceleration = new CookedVegetationClusterAcceleration(
+                    bounds,
+                    Array.AsReadOnly(spatialNodes),
+                    Array.AsReadOnly(speciesAcceleration))
+            };
+        }
         ValidateCluster(cluster, context);
         if (!string.Equals(cluster.PackageId, expectedPackageId, StringComparison.Ordinal))
         {
@@ -697,6 +878,333 @@ public static class VegetationClusterAssetCooker
             WritePosition(record[72..96], page.Bounds.Max);
             BinaryPrimitives.WriteUInt64LittleEndian(record[96..], checked((ulong)page.SizeInBytes));
             page.ContentHash.CopyTo(record[104..136]);
+        }
+
+        return bytes;
+    }
+
+    private static CookedVegetationClusterAcceleration BuildAcceleration(
+        CookedVegetationCluster cluster,
+        IReadOnlyList<CookedVegetationInstancePage>? pages,
+        IReadOnlyList<CookedVegetationSpecies>? speciesData)
+    {
+        ArgumentNullException.ThrowIfNull(cluster);
+        string context = $"vegetation cluster '{cluster.Guid:D}' acceleration";
+        CookedVegetationSpatialNode[] spatialNodes = BuildSpatialNodes(cluster.Pages, context);
+        var species = new CookedVegetationSpeciesAcceleration[cluster.Species.Count];
+        var speciesIndices = new Dictionary<SpeciesIdentity, int>();
+        for (int index = 0; index < cluster.Species.Count; index++)
+        {
+            CookedVegetationSpeciesReference reference = cluster.Species[index];
+            speciesIndices.Add(new SpeciesIdentity(reference.Guid, reference.PackageId), index);
+            species[index] = new CookedVegetationSpeciesAcceleration(
+                reference,
+                int.MaxValue,
+                -1,
+                0,
+                0,
+                cluster.Bounds,
+                0.0f,
+                0.0f,
+                0.0f);
+        }
+
+        var pageSets = new HashSet<int>[cluster.Species.Count];
+        var pageBounds = new WorldBounds?[cluster.Species.Count];
+        var maximumRadius = new float[cluster.Species.Count];
+        for (int index = 0; index < pageSets.Length; index++)
+        {
+            pageSets[index] = [];
+        }
+
+        if (pages == null)
+        {
+            for (int speciesIndex = 0; speciesIndex < pageSets.Length; speciesIndex++)
+            {
+                for (int pageIndex = 0; pageIndex < cluster.Pages.Count; pageIndex++)
+                {
+                    pageSets[speciesIndex].Add(pageIndex);
+                }
+            }
+        }
+
+        if (pages != null)
+        {
+            if (pages.Count != cluster.Pages.Count)
+            {
+                throw VegetationCookedContainer.Invalid(
+                    context,
+                    "built page count does not match the cluster page references");
+            }
+
+            for (int pageIndex = 0; pageIndex < pages.Count; pageIndex++)
+            {
+                CookedVegetationInstancePage page = pages[pageIndex];
+                if (page.Guid != cluster.Pages[pageIndex].Guid)
+                {
+                    throw VegetationCookedContainer.Invalid(
+                        context,
+                        $"built page '{page.Guid:D}' does not match canonical page index '{pageIndex}'");
+                }
+
+                CookedVegetationInstancePageAcceleration pageAcceleration =
+                    page.Acceleration ?? VegetationInstancePageAssetCooker.BuildAcceleration(page);
+                for (int rangeIndex = 0; rangeIndex < pageAcceleration.SpeciesRanges.Count; rangeIndex++)
+                {
+                    CookedVegetationSpeciesInstanceRange range =
+                        pageAcceleration.SpeciesRanges[rangeIndex];
+                    CookedVegetationSpeciesReference pageSpecies = page.Species[checked((int)range.SpeciesIndex)];
+                    if (!speciesIndices.TryGetValue(
+                            new SpeciesIdentity(pageSpecies.Guid, pageSpecies.PackageId),
+                            out int clusterSpeciesIndex))
+                    {
+                        throw VegetationCookedContainer.Invalid(
+                            context,
+                            $"page '{page.Guid:D}' references species outside the cluster table");
+                    }
+
+                    pageSets[clusterSpeciesIndex].Add(pageIndex);
+                    species[clusterSpeciesIndex] = species[clusterSpeciesIndex] with
+                    {
+                        InstanceCount = checked(
+                            species[clusterSpeciesIndex].InstanceCount + range.InstanceCount),
+                        Bounds = pageBounds[clusterSpeciesIndex].HasValue
+                            ? Union(pageBounds[clusterSpeciesIndex]!.Value, range.Bounds)
+                            : range.Bounds
+                    };
+                    pageBounds[clusterSpeciesIndex] = species[clusterSpeciesIndex].Bounds;
+                    maximumRadius[clusterSpeciesIndex] = Math.Max(
+                        maximumRadius[clusterSpeciesIndex],
+                        range.MaximumConservativeRadius);
+                }
+            }
+        }
+
+        for (int index = 0; index < species.Length; index++)
+        {
+            HashSet<int> coveredPages = pageSets[index];
+            if (coveredPages.Count == 0)
+            {
+                throw VegetationCookedContainer.Invalid(
+                    context,
+                    $"species '{index}' has no page coverage");
+            }
+
+            int firstPage = coveredPages.Min();
+            int lastPage = coveredPages.Max();
+            CookedVegetationSpeciesAcceleration current = species[index];
+            species[index] = current with
+            {
+                FirstPageIndex = firstPage,
+                LastPageIndex = lastPage,
+                PageCount = coveredPages.Count,
+                Bounds = pageBounds[index] ?? cluster.Bounds,
+                MaximumConservativeRadius = pages == null
+                    ? 0.0f
+                    : CanonicalizePositive(maximumRadius[index])
+            };
+        }
+
+        if (speciesData != null)
+        {
+            var suppliedSpecies = new HashSet<SpeciesIdentity>();
+            foreach (CookedVegetationSpecies speciesDescriptor in speciesData)
+            {
+                if (speciesDescriptor == null ||
+                    !suppliedSpecies.Add(new SpeciesIdentity(
+                        speciesDescriptor.Guid,
+                        speciesDescriptor.PackageId)) ||
+                    !speciesIndices.TryGetValue(
+                        new SpeciesIdentity(speciesDescriptor.Guid, speciesDescriptor.PackageId),
+                        out int speciesIndex))
+                {
+                    throw VegetationCookedContainer.Invalid(
+                        context,
+                        "species LOD data does not match the cluster species table");
+                }
+
+                if (speciesDescriptor.Lods == null || speciesDescriptor.Lods.Count == 0)
+                {
+                    throw VegetationCookedContainer.Invalid(
+                        context,
+                        $"species '{speciesIndex}' has no LOD descriptors");
+                }
+
+                CookedVegetationSpeciesLod lod = speciesDescriptor.Lods[^1];
+                species[speciesIndex] = species[speciesIndex] with
+                {
+                    MaximumLodDistance = CanonicalizeNonNegative(lod.MaximumDistance),
+                    MaximumLodScreenError = CanonicalizeNonNegative(lod.MaximumScreenError)
+                };
+            }
+
+            if (suppliedSpecies.Count != cluster.Species.Count)
+            {
+                throw VegetationCookedContainer.Invalid(
+                    context,
+                    "species LOD data does not cover every cluster species");
+            }
+        }
+
+        var acceleration = new CookedVegetationClusterAcceleration(
+            cluster.Bounds,
+            Array.AsReadOnly(spatialNodes),
+            Array.AsReadOnly(species));
+        ValidateAcceleration(cluster, acceleration, context);
+        return acceleration;
+    }
+
+    private static CookedVegetationSpatialNode[] BuildSpatialNodes(
+        IReadOnlyList<CookedVegetationInstancePageReference> pages,
+        string context)
+    {
+        var pageIndices = Enumerable.Range(0, pages.Count).ToArray();
+        var nodes = new List<CookedVegetationSpatialNode>(checked((pages.Count * 2) - 1));
+        BuildSpatialNodeRange(pageIndices, 0, pageIndices.Length, pages, nodes, context);
+        return nodes.ToArray();
+    }
+
+    private static int BuildSpatialNodeRange(
+        int[] pageIndices,
+        int start,
+        int count,
+        IReadOnlyList<CookedVegetationInstancePageReference> pages,
+        List<CookedVegetationSpatialNode> nodes,
+        string context)
+    {
+        int nodeIndex = nodes.Count;
+        nodes.Add(default);
+        if (count == 1)
+        {
+            int pageIndex = pageIndices[start];
+            nodes[nodeIndex] = new CookedVegetationSpatialNode(
+                pages[pageIndex].Bounds,
+                -1,
+                -1,
+                pageIndex,
+                1);
+            return nodeIndex;
+        }
+
+        WorldBounds bounds = pages[pageIndices[start]].Bounds;
+        for (int index = 1; index < count; index++)
+        {
+            bounds = Union(bounds, pages[pageIndices[start + index]].Bounds);
+        }
+
+        double spreadX = bounds.Max.X - bounds.Min.X;
+        double spreadY = bounds.Max.Y - bounds.Min.Y;
+        double spreadZ = bounds.Max.Z - bounds.Min.Z;
+        int axis = spreadY > spreadX ? 1 : 0;
+        if ((axis == 1 ? spreadY : spreadX) < spreadZ)
+        {
+            axis = 2;
+        }
+
+        for (int index = 1; index < count; index++)
+        {
+            int value = pageIndices[start + index];
+            int cursor = index - 1;
+            while (cursor >= 0 && CompareSpatialPages(
+                       value,
+                       pageIndices[start + cursor],
+                       pages,
+                       axis) < 0)
+            {
+                pageIndices[start + cursor + 1] = pageIndices[start + cursor];
+                cursor--;
+            }
+
+            pageIndices[start + cursor + 1] = value;
+        }
+
+        int leftCount = count / 2;
+        int left = BuildSpatialNodeRange(
+            pageIndices,
+            start,
+            leftCount,
+            pages,
+            nodes,
+            context);
+        int right = BuildSpatialNodeRange(
+            pageIndices,
+            start + leftCount,
+            count - leftCount,
+            pages,
+            nodes,
+            context);
+        nodes[nodeIndex] = new CookedVegetationSpatialNode(
+            bounds,
+            left,
+            right,
+            -1,
+            count);
+        return nodeIndex;
+    }
+
+    private static int CompareSpatialPages(
+        int leftIndex,
+        int rightIndex,
+        IReadOnlyList<CookedVegetationInstancePageReference> pages,
+        int axis)
+    {
+        CookedVegetationInstancePageReference left = pages[leftIndex];
+        CookedVegetationInstancePageReference right = pages[rightIndex];
+        double leftCenter = axis switch
+        {
+            1 => (left.Bounds.Min.Y + left.Bounds.Max.Y) * 0.5,
+            2 => (left.Bounds.Min.Z + left.Bounds.Max.Z) * 0.5,
+            _ => (left.Bounds.Min.X + left.Bounds.Max.X) * 0.5
+        };
+        double rightCenter = axis switch
+        {
+            1 => (right.Bounds.Min.Y + right.Bounds.Max.Y) * 0.5,
+            2 => (right.Bounds.Min.Z + right.Bounds.Max.Z) * 0.5,
+            _ => (right.Bounds.Min.X + right.Bounds.Max.X) * 0.5
+        };
+        int result = leftCenter.CompareTo(rightCenter);
+        return result != 0 ? result : ComparePageReferences(left, right);
+    }
+
+    private static byte[] BuildSpatialNodeSection(
+        CookedVegetationClusterAcceleration acceleration,
+        string context)
+    {
+        byte[] bytes = new byte[checked(acceleration.SpatialNodes.Count * SpatialNodeStride)];
+        for (int index = 0; index < acceleration.SpatialNodes.Count; index++)
+        {
+            CookedVegetationSpatialNode node = acceleration.SpatialNodes[index];
+            Span<byte> record = bytes.AsSpan(index * SpatialNodeStride, SpatialNodeStride);
+            WriteBounds(record[..48], node.Bounds);
+            BinaryPrimitives.WriteInt32LittleEndian(record[48..], node.LeftChildIndex);
+            BinaryPrimitives.WriteInt32LittleEndian(record[52..], node.RightChildIndex);
+            BinaryPrimitives.WriteInt32LittleEndian(record[56..], node.FirstPageIndex);
+            BinaryPrimitives.WriteInt32LittleEndian(record[60..], node.PageCount);
+            VegetationCookedContainer.EnsureZero(record[64..], context, $"spatial node {index} reserved bytes");
+        }
+
+        return bytes;
+    }
+
+    private static byte[] BuildSpeciesAccelerationSection(
+        CookedVegetationClusterAcceleration acceleration,
+        string context)
+    {
+        byte[] bytes = new byte[checked(acceleration.Species.Count * SpeciesAccelerationStride)];
+        for (int index = 0; index < acceleration.Species.Count; index++)
+        {
+            CookedVegetationSpeciesAcceleration species = acceleration.Species[index];
+            Span<byte> record = bytes.AsSpan(index * SpeciesAccelerationStride, SpeciesAccelerationStride);
+            BinaryPrimitives.WriteUInt32LittleEndian(record, checked((uint)index));
+            BinaryPrimitives.WriteUInt32LittleEndian(record[4..], checked((uint)species.FirstPageIndex));
+            BinaryPrimitives.WriteUInt32LittleEndian(record[8..], checked((uint)species.LastPageIndex));
+            BinaryPrimitives.WriteUInt32LittleEndian(record[12..], checked((uint)species.PageCount));
+            BinaryPrimitives.WriteUInt32LittleEndian(record[16..], checked((uint)species.InstanceCount));
+            WriteBounds(record[20..68], species.Bounds);
+            WriteCanonicalFloat(record[68..], species.MaximumConservativeRadius);
+            WriteCanonicalFloat(record[72..], species.MaximumLodDistance);
+            WriteCanonicalFloat(record[76..], species.MaximumLodScreenError);
+            VegetationCookedContainer.EnsureZero(record[80..], context, $"species acceleration {index} reserved bytes");
         }
 
         return bytes;
@@ -955,6 +1463,140 @@ public static class VegetationClusterAssetCooker
             throw VegetationCookedContainer.Invalid(
                 context,
                 "cluster bounds do not exactly equal the union of page bounds");
+        }
+
+        if (cluster.Acceleration != null)
+        {
+            ValidateAcceleration(cluster, cluster.Acceleration, context);
+        }
+    }
+
+    private static void ValidateAcceleration(
+        CookedVegetationCluster cluster,
+        CookedVegetationClusterAcceleration acceleration,
+        string context)
+    {
+        if (!acceleration.Bounds.IsValid ||
+            !IsCanonicalBounds(acceleration.Bounds) ||
+            !BoundsBitwiseEqual(acceleration.Bounds, cluster.Bounds) ||
+            acceleration.SpatialNodes == null ||
+            acceleration.SpatialNodes.Count is < 1 or > (MaximumPageCount * 2 - 1) ||
+            acceleration.Species == null ||
+            acceleration.Species.Count != cluster.Species.Count)
+        {
+            throw VegetationCookedContainer.Invalid(
+                context,
+                "acceleration bounds, node count, or species count is invalid");
+        }
+
+        bool[] coveredPages = new bool[cluster.Pages.Count];
+        bool[] referencedNodes = new bool[acceleration.SpatialNodes.Count];
+        referencedNodes[0] = true;
+        for (int nodeIndex = 0; nodeIndex < acceleration.SpatialNodes.Count; nodeIndex++)
+        {
+            CookedVegetationSpatialNode node = acceleration.SpatialNodes[nodeIndex];
+            if (!node.Bounds.IsValid ||
+                !IsCanonicalBounds(node.Bounds) ||
+                !ContainsBounds(cluster.Bounds, node.Bounds) ||
+                node.PageCount <= 0 ||
+                node.PageCount > cluster.Pages.Count)
+            {
+                throw VegetationCookedContainer.Invalid(
+                    context,
+                    $"spatial node '{nodeIndex}' bounds or page count is invalid");
+            }
+
+            if (node.IsLeaf)
+            {
+                if (node.FirstPageIndex < 0 ||
+                    node.FirstPageIndex >= cluster.Pages.Count ||
+                    node.PageCount != 1 ||
+                    !BoundsBitwiseEqual(
+                        node.Bounds,
+                        cluster.Pages[node.FirstPageIndex].Bounds) ||
+                    coveredPages[node.FirstPageIndex])
+                {
+                    throw VegetationCookedContainer.Invalid(
+                        context,
+                        $"spatial leaf '{nodeIndex}' does not exactly cover one page");
+                }
+
+                coveredPages[node.FirstPageIndex] = true;
+                continue;
+            }
+
+            if (node.LeftChildIndex <= nodeIndex ||
+                node.LeftChildIndex >= acceleration.SpatialNodes.Count ||
+                node.RightChildIndex <= nodeIndex ||
+                node.RightChildIndex >= acceleration.SpatialNodes.Count ||
+                node.FirstPageIndex != -1 ||
+                node.PageCount < 2 ||
+                referencedNodes[node.LeftChildIndex] ||
+                referencedNodes[node.RightChildIndex])
+            {
+                throw VegetationCookedContainer.Invalid(
+                    context,
+                    $"spatial node '{nodeIndex}' child or range identity is invalid");
+            }
+
+            referencedNodes[node.LeftChildIndex] = true;
+            referencedNodes[node.RightChildIndex] = true;
+
+            CookedVegetationSpatialNode left = acceleration.SpatialNodes[node.LeftChildIndex];
+            CookedVegetationSpatialNode right = acceleration.SpatialNodes[node.RightChildIndex];
+            WorldBounds expectedBounds = Union(left.Bounds, right.Bounds);
+            if (!BoundsBitwiseEqual(node.Bounds, expectedBounds) ||
+                node.PageCount != left.PageCount + right.PageCount)
+            {
+                throw VegetationCookedContainer.Invalid(
+                    context,
+                    $"spatial node '{nodeIndex}' bounds or page range is not conservative");
+            }
+        }
+
+        if (coveredPages.Any(covered => !covered))
+        {
+            throw VegetationCookedContainer.Invalid(
+                context,
+                "spatial hierarchy does not cover every cluster page exactly once");
+        }
+
+        if (referencedNodes.Any(referenced => !referenced))
+        {
+            throw VegetationCookedContainer.Invalid(
+                context,
+                "spatial hierarchy contains an unreachable node");
+        }
+
+        CookedVegetationSpeciesAcceleration? previousSpecies = null;
+        for (int speciesIndex = 0; speciesIndex < acceleration.Species.Count; speciesIndex++)
+        {
+            CookedVegetationSpeciesAcceleration species = acceleration.Species[speciesIndex];
+            CookedVegetationSpeciesReference expectedReference = cluster.Species[speciesIndex];
+            if (species == null ||
+                !species.Species.Equals(expectedReference) ||
+                (previousSpecies != null &&
+                 CompareSpecies(previousSpecies.Species, species.Species) >= 0) ||
+                species.FirstPageIndex < 0 ||
+                species.LastPageIndex < species.FirstPageIndex ||
+                species.LastPageIndex >= cluster.Pages.Count ||
+                species.PageCount <= 0 ||
+                species.PageCount > cluster.Pages.Count ||
+                species.InstanceCount < 0 ||
+                species.InstanceCount > cluster.InstanceCount ||
+                !species.Bounds.IsValid ||
+                !IsCanonicalBounds(species.Bounds) ||
+                !ContainsBounds(cluster.Bounds, species.Bounds) ||
+                !IsCanonicalNonNegative(species.MaximumConservativeRadius) ||
+                !IsCanonicalNonNegative(species.MaximumLodDistance) ||
+                !IsCanonicalNonNegative(species.MaximumLodScreenError))
+            {
+                throw VegetationCookedContainer.Invalid(
+                    context,
+                    $"species acceleration '{speciesIndex}' is invalid");
+            }
+
+            previousSpecies = species;
         }
     }
 
@@ -1419,6 +2061,59 @@ public static class VegetationClusterAssetCooker
         BinaryPrimitives.WriteDoubleLittleEndian(bytes[16..], position.Z);
     }
 
+    private static void WriteBounds(Span<byte> bytes, WorldBounds bounds)
+    {
+        WritePosition(bytes[..24], bounds.Min);
+        WritePosition(bytes[24..48], bounds.Max);
+    }
+
+    private static WorldBounds ReadBounds(
+        ReadOnlySpan<byte> bytes,
+        string context,
+        string field)
+    {
+        var bounds = new WorldBounds(
+            ReadCanonicalPosition(bytes[..24], context, $"{field} minimum"),
+            ReadCanonicalPosition(bytes[24..48], context, $"{field} maximum"));
+        if (!bounds.IsValid)
+        {
+            throw VegetationCookedContainer.Invalid(context, $"{field} is invalid");
+        }
+
+        return bounds;
+    }
+
+    private static float ReadCanonicalPositiveFloat(
+        ReadOnlySpan<byte> bytes,
+        string context,
+        string field)
+    {
+        float value = ReadCanonicalNonNegativeFloat(bytes, context, field);
+        if (value <= 0.0f)
+        {
+            throw VegetationCookedContainer.Invalid(context, $"{field} is not positive");
+        }
+
+        return value;
+    }
+
+    private static float ReadCanonicalNonNegativeFloat(
+        ReadOnlySpan<byte> bytes,
+        string context,
+        string field)
+    {
+        uint bits = BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+        float value = BitConverter.UInt32BitsToSingle(bits);
+        if (!float.IsFinite(value) || bits == 0x80000000U || value < 0.0f)
+        {
+            throw VegetationCookedContainer.Invalid(
+                context,
+                $"{field} is non-finite, negative, or encoded as negative zero");
+        }
+
+        return value;
+    }
+
     private static WorldPosition ReadCanonicalPosition(
         ReadOnlySpan<byte> bytes,
         string context,
@@ -1451,6 +2146,24 @@ public static class VegetationClusterAssetCooker
         BitConverter.DoubleToInt64Bits(value) != unchecked((long)0x8000000000000000UL);
 
     private static double CanonicalizeZero(double value) => value == 0.0 ? 0.0 : value;
+
+    private static float CanonicalizePositive(float value) => value > 0.0f ? value : 0.0f;
+
+    private static float CanonicalizeNonNegative(float value) => value == 0.0f ? 0.0f : value;
+
+    private static void WriteCanonicalFloat(Span<byte> bytes, float value) =>
+        BinaryPrimitives.WriteSingleLittleEndian(bytes, CanonicalizeNonNegative(value));
+
+    private static bool IsCanonicalNonNegative(float value) =>
+        float.IsFinite(value) && value >= 0.0f && BitConverter.SingleToInt32Bits(value) != unchecked((int)0x80000000U);
+
+    private static bool ContainsBounds(WorldBounds outer, WorldBounds inner) =>
+        inner.Min.X >= outer.Min.X &&
+        inner.Min.Y >= outer.Min.Y &&
+        inner.Min.Z >= outer.Min.Z &&
+        inner.Max.X <= outer.Max.X &&
+        inner.Max.Y <= outer.Max.Y &&
+        inner.Max.Z <= outer.Max.Z;
 
     private static bool PositionBitwiseEqual(WorldPosition left, WorldPosition right) =>
         DoubleBitwiseEqual(left.X, right.X) &&

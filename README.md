@@ -27,17 +27,19 @@ identity includes world-cell, terrain package/GUID, species package/GUID,
 biome, and entry ownership; page identity includes a SHA-256 of the
 codec-canonical instance records and excludes pre-codec recipe values.
 
-The current result contains one non-empty bounded instance page, its logical
-cluster descriptor, generated metadata, a placement hash, and reconciled reject
-metrics. The caller registers the generated identities and publishes through
-`VegetationClusterAssetCooker`, which validates and commits the page before the
-cluster root.
+The current result contains an explicit valid-empty plan or bounded non-empty
+pages partitioned in stable-key order, a logical cluster descriptor, generated
+metadata, per-page hashes, a placement hash, and reconciled reject metrics. The
+recipe generator stages the complete generated source set and publishes the
+cluster/page closure transactionally through `IAssetDatabase.PublishCookedArtifactSet`.
+Unchanged pages retain their artifacts; stale generated identities are removed
+only from the exact prior closure, and a failed replacement restores the prior
+source and cooked state.
 
-## Current Limits
+## Runtime Boundary
 
-- Valid empty cells do not yet return an explicit no-output plan.
-- Accepted instances are not yet partitioned into multiple pages.
-- Publishing a replacement cluster closure does not atomically remove stale
-  page rows and files or roll back already committed child pages.
-- Scene codecs, runtime residency, rendering, and Editor scatter tooling remain
-  later milestones.
+The package also owns the cluster scene codec, cell-owned generation-qualified
+CPU residency, bounded query/diagnostic services, and authoring-preview
+publication. Generic Render Pipeline integration, including setup-owned
+culling/LOD and GPU resource preparation, remains in
+`com.arisen.vegetation.generic-renderpipeline`.

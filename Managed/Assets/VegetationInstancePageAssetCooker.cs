@@ -13,7 +13,8 @@ internal enum CookedVegetationInstancePageSectionType : uint
     Metadata = 1,
     Strings = 2,
     Species = 3,
-    Instances = 4
+    Instances = 4,
+    Acceleration = 5
 }
 
 public static class VegetationInstancePageAssetCooker
@@ -27,6 +28,7 @@ public static class VegetationInstancePageAssetCooker
     internal const int MetadataStride = 128;
     internal const int SpeciesStride = 24;
     internal const int InstanceStride = 40;
+    internal const int AccelerationStride = 72;
     internal const int MaximumInstanceCount = 65_536;
     internal const int MaximumSpeciesCount = 1_024;
     internal const int CurrentGeneratedSchemaVersion = 1;
@@ -45,7 +47,8 @@ public static class VegetationInstancePageAssetCooker
         (uint)CookedVegetationInstancePageSectionType.Metadata,
         (uint)CookedVegetationInstancePageSectionType.Strings,
         (uint)CookedVegetationInstancePageSectionType.Species,
-        (uint)CookedVegetationInstancePageSectionType.Instances
+        (uint)CookedVegetationInstancePageSectionType.Instances,
+        (uint)CookedVegetationInstancePageSectionType.Acceleration
     ];
 
     public static CookedVegetationInstancePageArtifact Cook(
@@ -210,6 +213,7 @@ public static class VegetationInstancePageAssetCooker
             bounds,
             Array.AsReadOnly(canonicalSpeciesTable),
             Array.AsReadOnly(canonicalInstances));
+        page = page with { Acceleration = BuildAcceleration(page) };
         ValidatePage(page, context);
         return page;
     }
@@ -522,6 +526,7 @@ public static class VegetationInstancePageAssetCooker
     {
         ArgumentNullException.ThrowIfNull(page);
         string context = $"vegetation instance page '{page.Guid:D}'";
+        page = page with { Acceleration = page.Acceleration ?? BuildAcceleration(page) };
         ValidatePage(page, context);
 
         string[] strings = BuildCanonicalStrings(page);
@@ -529,6 +534,7 @@ public static class VegetationInstancePageAssetCooker
         byte[] metadata = BuildMetadataSection(page, stringIndices);
         byte[] species = BuildSpeciesSection(page, stringIndices);
         byte[] instances = BuildInstanceSection(page, context);
+        byte[] acceleration = BuildAccelerationSection(page.Acceleration!, context);
         VegetationCookedSectionPayload[] sections =
         [
             new(
@@ -554,7 +560,13 @@ public static class VegetationInstancePageAssetCooker
                 VegetationCookedSectionFlags.Required,
                 checked((uint)page.Instances.Count),
                 InstanceStride,
-                instances)
+                instances),
+            new(
+                (uint)CookedVegetationInstancePageSectionType.Acceleration,
+                VegetationCookedSectionFlags.None,
+                checked((uint)page.Acceleration!.SpeciesRanges.Count),
+                AccelerationStride,
+                acceleration)
         ];
 
         byte[] output = VegetationCookedContainer.Build(
@@ -640,17 +652,75 @@ public static class VegetationInstancePageAssetCooker
             return;
         }
 
-        if (File.Exists(existing.Path) &&
-            new FileInfo(existing.Path).Length == payload.Length &&
-            payload.SequenceEqual(File.ReadAllBytes(existing.Path)))
+        if (!File.Exists(existing.Path))
+        {
+            return;
+        }
+
+        byte[] publishedBytes = File.ReadAllBytes(existing.Path);
+        if (publishedBytes.AsSpan().SequenceEqual(payload))
+        {
+            return;
+        }
+
+        // Raw bytes may legitimately differ under one immutable page identity: format-v1 pages
+        // carry optional derived sections such as acceleration ranges that readers reconstruct
+        // when absent, and transactional artifact-set publication replaces the published bytes.
+        // The canonical placement content must never change for one page GUID.
+        if (TryReadPayload(
+                page.Guid,
+                page.ClusterGuid,
+                page.PackageId,
+                publishedBytes,
+                existing.Path,
+                out CookedVegetationInstancePage publishedPage,
+                out _) &&
+            HasEquivalentCanonicalContent(publishedPage, page))
         {
             return;
         }
 
         throw new InvalidOperationException(
             $"[VegetationInstancePageAssetCooker] Instance page '{page.Guid:D}' already has " +
-            "different published bytes. Format-v1 page identities are immutable; changed content " +
-            "must use a new explicit page GUID until Milestone 3 adds transactional replacement.");
+            "a published artifact with different canonical placement content. Format-v1 page " +
+            "identities are immutable; changed placement content must use a new explicit page GUID.");
+    }
+
+    private static bool HasEquivalentCanonicalContent(
+        CookedVegetationInstancePage published,
+        CookedVegetationInstancePage candidate)
+    {
+        if (published.Guid != candidate.Guid ||
+            published.ClusterGuid != candidate.ClusterGuid ||
+            !string.Equals(published.PackageId, candidate.PackageId, StringComparison.Ordinal) ||
+            published.GeneratedSchemaVersion != candidate.GeneratedSchemaVersion ||
+            !DoubleBitwiseEqual(published.Origin.X, candidate.Origin.X) ||
+            !DoubleBitwiseEqual(published.Origin.Y, candidate.Origin.Y) ||
+            !DoubleBitwiseEqual(published.Origin.Z, candidate.Origin.Z) ||
+            !BoundsBitwiseEqual(published.Bounds, candidate.Bounds) ||
+            published.Species.Count != candidate.Species.Count ||
+            published.Instances.Count != candidate.Instances.Count)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < published.Species.Count; index++)
+        {
+            if (published.Species[index] != candidate.Species[index])
+            {
+                return false;
+            }
+        }
+
+        for (int index = 0; index < published.Instances.Count; index++)
+        {
+            if (published.Instances[index] != candidate.Instances[index])
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static CookedVegetationInstancePage ReadPayload(
@@ -735,6 +805,23 @@ public static class VegetationInstancePageAssetCooker
             checked((uint)instanceCount),
             MaximumInstanceCount,
             context);
+        VegetationCookedSectionDescriptor? accelerationSection = null;
+        if (sections.TryGetValue(
+                (uint)CookedVegetationInstancePageSectionType.Acceleration,
+                out VegetationCookedSectionDescriptor encodedAcceleration))
+        {
+            if (encodedAcceleration.Flags != VegetationCookedSectionFlags.None ||
+                encodedAcceleration.Stride != AccelerationStride ||
+                encodedAcceleration.Count != checked((uint)speciesCount) ||
+                encodedAcceleration.Count > MaximumSpeciesCount)
+            {
+                throw VegetationCookedContainer.Invalid(
+                    context,
+                    "optional acceleration section has invalid flags, stride, or count");
+            }
+
+            accelerationSection = encodedAcceleration;
+        }
 
         string[] strings = VegetationCookedContainer.ReadStrings(
             bytes,
@@ -866,6 +953,68 @@ public static class VegetationInstancePageAssetCooker
                 "stored world bounds do not bitwise match the decoded instances");
         }
 
+        CookedVegetationInstancePageAcceleration acceleration;
+        if (accelerationSection.HasValue)
+        {
+            ReadOnlySpan<byte> accelerationBytes = VegetationCookedContainer.GetSection(
+                bytes,
+                accelerationSection.Value);
+            var ranges = new CookedVegetationSpeciesInstanceRange[speciesCount];
+            for (int index = 0; index < ranges.Length; index++)
+            {
+                ReadOnlySpan<byte> record = accelerationBytes.Slice(
+                    index * AccelerationStride,
+                    AccelerationStride);
+                uint speciesIndex = BinaryPrimitives.ReadUInt32LittleEndian(record);
+                uint rawFirst = BinaryPrimitives.ReadUInt32LittleEndian(record[4..]);
+                uint rawLast = BinaryPrimitives.ReadUInt32LittleEndian(record[8..]);
+                uint rawCount = BinaryPrimitives.ReadUInt32LittleEndian(record[12..]);
+                if (rawFirst > int.MaxValue || rawLast > int.MaxValue || rawCount > int.MaxValue)
+                {
+                    throw VegetationCookedContainer.Invalid(
+                        context,
+                        $"species range '{index}' index or count is outside the signed range");
+                }
+
+                WorldBounds rangeBounds = ReadBounds(
+                    record[16..64],
+                    context,
+                    $"species range {index} bounds");
+                float maximumRadius = ReadCanonicalPositiveFloat(
+                    record[64..68],
+                    context,
+                    $"species range {index} maximum radius");
+                VegetationCookedContainer.EnsureZero(
+                    record[68..],
+                    context,
+                    $"species range {index} reserved bytes");
+                ranges[index] = new CookedVegetationSpeciesInstanceRange(
+                    speciesIndex,
+                    checked((int)rawFirst),
+                    checked((int)rawLast),
+                    checked((int)rawCount),
+                    rangeBounds,
+                    maximumRadius);
+            }
+
+            acceleration = new CookedVegetationInstancePageAcceleration(
+                computedBounds,
+                Array.AsReadOnly(ranges));
+        }
+        else
+        {
+            acceleration = BuildAcceleration(
+                new CookedVegetationInstancePage(
+                    pageGuid,
+                    clusterGuid,
+                    packageId,
+                    generatedSchemaVersion,
+                    origin,
+                    computedBounds,
+                    Array.AsReadOnly(species),
+                    Array.AsReadOnly(instances)));
+        }
+
         var page = new CookedVegetationInstancePage(
             pageGuid,
             clusterGuid,
@@ -874,7 +1023,10 @@ public static class VegetationInstancePageAssetCooker
             origin,
             computedBounds,
             Array.AsReadOnly(species),
-            Array.AsReadOnly(instances));
+            Array.AsReadOnly(instances))
+        {
+            Acceleration = acceleration
+        };
         ValidateCanonicalStrings(strings, BuildCanonicalStrings(page), context);
         ValidatePage(page, context);
         return page;
@@ -944,6 +1096,206 @@ public static class VegetationInstancePageAssetCooker
         return bytes;
     }
 
+    internal static CookedVegetationInstancePageAcceleration BuildAcceleration(
+        CookedVegetationInstancePage page)
+    {
+        ArgumentNullException.ThrowIfNull(page);
+        string context = $"vegetation instance page '{page.Guid:D}' acceleration";
+        if (page.Species == null || page.Instances == null || page.Species.Count == 0 ||
+            page.Instances.Count == 0)
+        {
+            throw VegetationCookedContainer.Invalid(
+                context,
+                "species and instance data are required");
+        }
+
+        var ranges = new CookedVegetationSpeciesInstanceRange[page.Species.Count];
+        for (int speciesIndex = 0; speciesIndex < ranges.Length; speciesIndex++)
+        {
+            int first = -1;
+            int last = -1;
+            int count = 0;
+            float maximumRadius = 0.0f;
+            double minX = double.PositiveInfinity;
+            double minY = double.PositiveInfinity;
+            double minZ = double.PositiveInfinity;
+            double maxX = double.NegativeInfinity;
+            double maxY = double.NegativeInfinity;
+            double maxZ = double.NegativeInfinity;
+            for (int instanceIndex = 0; instanceIndex < page.Instances.Count; instanceIndex++)
+            {
+                CookedVegetationInstance instance = page.Instances[instanceIndex];
+                if (instance.SpeciesIndex != (uint)speciesIndex)
+                {
+                    continue;
+                }
+
+                first = first < 0 ? instanceIndex : first;
+                last = instanceIndex;
+                count++;
+                maximumRadius = Math.Max(maximumRadius, instance.ConservativeRadius);
+                double x = page.Origin.X + instance.LocalPosition.X;
+                double y = page.Origin.Y + instance.LocalPosition.Y;
+                double z = page.Origin.Z + instance.LocalPosition.Z;
+                minX = Math.Min(minX, x - instance.ConservativeRadius);
+                minY = Math.Min(minY, y - instance.ConservativeRadius);
+                minZ = Math.Min(minZ, z - instance.ConservativeRadius);
+                maxX = Math.Max(maxX, x + instance.ConservativeRadius);
+                maxY = Math.Max(maxY, y + instance.ConservativeRadius);
+                maxZ = Math.Max(maxZ, z + instance.ConservativeRadius);
+            }
+
+            if (count == 0 || !float.IsFinite(maximumRadius))
+            {
+                throw VegetationCookedContainer.Invalid(
+                    context,
+                    $"species '{speciesIndex}' has no valid instances");
+            }
+
+            var bounds = new WorldBounds(
+                new WorldPosition(
+                    CanonicalizeZero(minX),
+                    CanonicalizeZero(minY),
+                    CanonicalizeZero(minZ)),
+                new WorldPosition(
+                    CanonicalizeZero(maxX),
+                    CanonicalizeZero(maxY),
+                    CanonicalizeZero(maxZ)));
+            if (!bounds.IsValid || !IsCanonicalBounds(bounds))
+            {
+                throw VegetationCookedContainer.Invalid(
+                    context,
+                    $"species '{speciesIndex}' bounds are invalid");
+            }
+
+            ranges[speciesIndex] = new CookedVegetationSpeciesInstanceRange(
+                checked((uint)speciesIndex),
+                first,
+                last,
+                count,
+                bounds,
+                CanonicalizeZero(maximumRadius));
+        }
+
+        var acceleration = new CookedVegetationInstancePageAcceleration(
+            page.Bounds,
+            Array.AsReadOnly(ranges));
+        ValidateAcceleration(page, acceleration, context);
+        return acceleration;
+    }
+
+    private static byte[] BuildAccelerationSection(
+        CookedVegetationInstancePageAcceleration acceleration,
+        string context)
+    {
+        byte[] bytes = new byte[checked(acceleration.SpeciesRanges.Count * AccelerationStride)];
+        for (int index = 0; index < acceleration.SpeciesRanges.Count; index++)
+        {
+            CookedVegetationSpeciesInstanceRange range = acceleration.SpeciesRanges[index];
+            Span<byte> record = bytes.AsSpan(index * AccelerationStride, AccelerationStride);
+            BinaryPrimitives.WriteUInt32LittleEndian(record, range.SpeciesIndex);
+            BinaryPrimitives.WriteUInt32LittleEndian(record[4..], checked((uint)range.FirstInstanceIndex));
+            BinaryPrimitives.WriteUInt32LittleEndian(record[8..], checked((uint)range.LastInstanceIndex));
+            BinaryPrimitives.WriteUInt32LittleEndian(record[12..], checked((uint)range.InstanceCount));
+            WriteBounds(record[16..64], range.Bounds);
+            WriteCanonicalFloat(record[64..], range.MaximumConservativeRadius);
+            VegetationCookedContainer.EnsureZero(record[68..], context, $"species range {index} reserved bytes");
+        }
+
+        return bytes;
+    }
+
+    private static void ValidateAcceleration(
+        CookedVegetationInstancePage page,
+        CookedVegetationInstancePageAcceleration acceleration,
+        string context)
+    {
+        if (acceleration.Bounds.IsValid == false ||
+            !IsCanonicalBounds(acceleration.Bounds) ||
+            !BoundsBitwiseEqual(acceleration.Bounds, page.Bounds) ||
+            acceleration.SpeciesRanges == null ||
+            acceleration.SpeciesRanges.Count != page.Species.Count)
+        {
+            throw VegetationCookedContainer.Invalid(
+                context,
+                "page bounds or species range count is invalid");
+        }
+
+        for (int speciesIndex = 0; speciesIndex < acceleration.SpeciesRanges.Count; speciesIndex++)
+        {
+            CookedVegetationSpeciesInstanceRange range = acceleration.SpeciesRanges[speciesIndex];
+            if (range == null ||
+                range.SpeciesIndex != (uint)speciesIndex ||
+                range.FirstInstanceIndex < 0 ||
+                range.LastInstanceIndex < range.FirstInstanceIndex ||
+                range.LastInstanceIndex >= page.Instances.Count ||
+                range.InstanceCount <= 0 ||
+                range.InstanceCount > page.Instances.Count ||
+                !range.Bounds.IsValid ||
+                !IsCanonicalBounds(range.Bounds) ||
+                !IsCanonicalPositive(range.MaximumConservativeRadius))
+            {
+                throw VegetationCookedContainer.Invalid(
+                    context,
+                    $"species range '{speciesIndex}' is invalid");
+            }
+
+            int first = -1;
+            int last = -1;
+            int count = 0;
+            float maximumRadius = 0.0f;
+            double minX = double.PositiveInfinity;
+            double minY = double.PositiveInfinity;
+            double minZ = double.PositiveInfinity;
+            double maxX = double.NegativeInfinity;
+            double maxY = double.NegativeInfinity;
+            double maxZ = double.NegativeInfinity;
+            for (int instanceIndex = 0; instanceIndex < page.Instances.Count; instanceIndex++)
+            {
+                CookedVegetationInstance instance = page.Instances[instanceIndex];
+                if (instance.SpeciesIndex != (uint)speciesIndex)
+                {
+                    continue;
+                }
+
+                first = first < 0 ? instanceIndex : first;
+                last = instanceIndex;
+                count++;
+                maximumRadius = Math.Max(maximumRadius, instance.ConservativeRadius);
+                double x = page.Origin.X + instance.LocalPosition.X;
+                double y = page.Origin.Y + instance.LocalPosition.Y;
+                double z = page.Origin.Z + instance.LocalPosition.Z;
+                minX = Math.Min(minX, x - instance.ConservativeRadius);
+                minY = Math.Min(minY, y - instance.ConservativeRadius);
+                minZ = Math.Min(minZ, z - instance.ConservativeRadius);
+                maxX = Math.Max(maxX, x + instance.ConservativeRadius);
+                maxY = Math.Max(maxY, y + instance.ConservativeRadius);
+                maxZ = Math.Max(maxZ, z + instance.ConservativeRadius);
+            }
+
+            var expectedBounds = new WorldBounds(
+                new WorldPosition(
+                    CanonicalizeZero(minX),
+                    CanonicalizeZero(minY),
+                    CanonicalizeZero(minZ)),
+                new WorldPosition(
+                    CanonicalizeZero(maxX),
+                    CanonicalizeZero(maxY),
+                    CanonicalizeZero(maxZ)));
+            if (first != range.FirstInstanceIndex ||
+                last != range.LastInstanceIndex ||
+                count != range.InstanceCount ||
+                BitConverter.SingleToInt32Bits(maximumRadius) !=
+                    BitConverter.SingleToInt32Bits(range.MaximumConservativeRadius) ||
+                !BoundsBitwiseEqual(expectedBounds, range.Bounds))
+            {
+                throw VegetationCookedContainer.Invalid(
+                    context,
+                    $"species range '{speciesIndex}' does not match the instance payload");
+            }
+        }
+    }
+
     private static void ValidatePage(CookedVegetationInstancePage page, string context)
     {
         if (page.Guid == Guid.Empty ||
@@ -1011,6 +1363,11 @@ public static class VegetationInstancePageAssetCooker
             throw VegetationCookedContainer.Invalid(
                 context,
                 "world bounds are invalid or do not bitwise match the instance payload");
+        }
+
+        if (page.Acceleration != null)
+        {
+            ValidateAcceleration(page, page.Acceleration, context);
         }
     }
 
@@ -1546,6 +1903,38 @@ public static class VegetationInstancePageAssetCooker
     private static void WriteCanonicalFloat(Span<byte> bytes, float value)
     {
         BinaryPrimitives.WriteSingleLittleEndian(bytes, CanonicalizeZero(value));
+    }
+
+    private static void WriteBounds(Span<byte> bytes, WorldBounds bounds)
+    {
+        BinaryPrimitives.WriteDoubleLittleEndian(bytes, bounds.Min.X);
+        BinaryPrimitives.WriteDoubleLittleEndian(bytes[8..], bounds.Min.Y);
+        BinaryPrimitives.WriteDoubleLittleEndian(bytes[16..], bounds.Min.Z);
+        BinaryPrimitives.WriteDoubleLittleEndian(bytes[24..], bounds.Max.X);
+        BinaryPrimitives.WriteDoubleLittleEndian(bytes[32..], bounds.Max.Y);
+        BinaryPrimitives.WriteDoubleLittleEndian(bytes[40..], bounds.Max.Z);
+    }
+
+    private static WorldBounds ReadBounds(
+        ReadOnlySpan<byte> bytes,
+        string context,
+        string field)
+    {
+        var bounds = new WorldBounds(
+            new WorldPosition(
+                ReadCanonicalDouble(bytes, context, $"{field} minimum X"),
+                ReadCanonicalDouble(bytes[8..], context, $"{field} minimum Y"),
+                ReadCanonicalDouble(bytes[16..], context, $"{field} minimum Z")),
+            new WorldPosition(
+                ReadCanonicalDouble(bytes[24..], context, $"{field} maximum X"),
+                ReadCanonicalDouble(bytes[32..], context, $"{field} maximum Y"),
+                ReadCanonicalDouble(bytes[40..], context, $"{field} maximum Z")));
+        if (!bounds.IsValid)
+        {
+            throw VegetationCookedContainer.Invalid(context, $"{field} is invalid");
+        }
+
+        return bounds;
     }
 
     private static float CanonicalizeZero(float value) => value == 0.0f ? 0.0f : value;

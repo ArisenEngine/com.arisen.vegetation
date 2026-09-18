@@ -703,6 +703,7 @@ public sealed class VegetationResidentPageData
 {
     private readonly VegetationResidentSpecies[] m_Species;
     private readonly VegetationResidentInstance[] m_Instances;
+    private readonly CookedVegetationInstancePageAcceleration? m_Acceleration;
     private readonly byte[] m_ContentHash;
 
     private VegetationResidentPageData(
@@ -713,6 +714,7 @@ public sealed class VegetationResidentPageData
         WorldBounds bounds,
         VegetationResidentSpecies[] species,
         VegetationResidentInstance[] instances,
+        CookedVegetationInstancePageAcceleration? acceleration,
         long sizeInBytes,
         byte[] contentHash,
         ulong generation)
@@ -724,6 +726,7 @@ public sealed class VegetationResidentPageData
         Bounds = bounds;
         m_Species = species;
         m_Instances = instances;
+        m_Acceleration = acceleration;
         SizeInBytes = sizeInBytes;
         m_ContentHash = contentHash;
         Generation = generation;
@@ -742,6 +745,8 @@ public sealed class VegetationResidentPageData
     public ReadOnlySpan<VegetationResidentSpecies> Species => m_Species;
 
     public ReadOnlySpan<VegetationResidentInstance> Instances => m_Instances;
+
+    public CookedVegetationInstancePageAcceleration? Acceleration => m_Acceleration;
 
     public int InstanceCount => m_Instances.Length;
 
@@ -846,6 +851,7 @@ public sealed class VegetationResidentPageData
             page.Bounds,
             species,
             instances,
+            page.Acceleration,
             payloadIdentity.SizeInBytes,
             payloadIdentity.ContentHash.ToArray(),
             generation: 0);
@@ -866,6 +872,7 @@ public sealed class VegetationResidentPageData
             Bounds,
             m_Species,
             m_Instances,
+            m_Acceleration,
             SizeInBytes,
             m_ContentHash,
             generation);

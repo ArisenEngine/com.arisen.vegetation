@@ -535,7 +535,7 @@ public static class VegetationScatterRecipeGenerator
             .OrderBy(asset => asset.PackageId, StringComparer.Ordinal)
             .ThenBy(asset => asset.Guid)
             .ToArray();
-        var prepared = new PreparedRecipe[sources.Length];
+        var prepared = new List<PreparedRecipe>(sources.Length);
         var generatedGuids = new HashSet<Guid>();
         var generatedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (int index = 0; index < sources.Length; index++)
@@ -561,16 +561,6 @@ public static class VegetationScatterRecipeGenerator
                     recipe.EntryId,
                     recipe.UnscaledConservativeRadius,
                     recipe.Exclusions));
-            if (bake.Cluster.Biome.Guid != closure.BiomeGuid ||
-                bake.Cluster.Pages.Any(page =>
-                    page.Species.Count != 1 ||
-                    page.Species[0].Guid != closure.SpeciesGuid))
-            {
-                throw new InvalidOperationException(
-                    $"[VegetationScatterRecipeGenerator] Recipe '{recipe.Guid:D}' produced a " +
-                    "cluster outside its cooked biome/species closure.");
-            }
-
             string outputDirectory = GetGeneratedDirectory(source);
             if (!generatedDirectories.Add(outputDirectory))
             {
@@ -579,47 +569,43 @@ public static class VegetationScatterRecipeGenerator
                     $"'{outputDirectory}'.");
             }
 
-            if (!generatedGuids.Add(bake.ClusterMetadata.Guid) ||
-                bake.PageMetadata.Any(metadata => !generatedGuids.Add(metadata.Guid)))
+            if (bake.HasOutput)
             {
-                throw new InvalidOperationException(
-                    $"[VegetationScatterRecipeGenerator] Recipe '{recipe.Guid:D}' generated a " +
-                    "duplicate cluster/page identity.");
+                VegetationClusterCookDescriptor cluster = bake.Cluster;
+                if (cluster.Biome.Guid != closure.BiomeGuid ||
+                    cluster.Pages.Any(page =>
+                        page.Species.Count != 1 ||
+                        page.Species[0].Guid != closure.SpeciesGuid))
+                {
+                    throw new InvalidOperationException(
+                        $"[VegetationScatterRecipeGenerator] Recipe '{recipe.Guid:D}' produced a " +
+                        "cluster outside its cooked biome/species closure.");
+                }
+
+                if (!generatedGuids.Add(bake.ClusterMetadata.Guid) ||
+                    bake.PageMetadata.Any(metadata => !generatedGuids.Add(metadata.Guid)))
+                {
+                    throw new InvalidOperationException(
+                        $"[VegetationScatterRecipeGenerator] Recipe '{recipe.Guid:D}' generated a " +
+                        "duplicate cluster/page identity.");
+                }
             }
 
-            prepared[index] = new PreparedRecipe(source, recipe, bake, outputDirectory);
+            prepared.Add(new PreparedRecipe(source, recipe, bake, outputDirectory));
         }
 
+        var results = new List<VegetationScatterRecipeGenerationResult>(prepared.Count);
         foreach (PreparedRecipe item in prepared)
         {
-            WriteGeneratedSources(item);
+            VegetationScatterRecipeGenerationResult? result =
+                PublishPreparedRecipe(assetDatabase, sourceIndex, item);
+            if (result != null)
+            {
+                results.Add(result);
+            }
         }
 
-        foreach (PreparedRecipe item in prepared)
-        {
-            sourceIndex.RefreshSourceDirectory(item.OutputDirectory, item.Source.PackageId);
-            ValidateGeneratedSources(assetDatabase, item);
-        }
-
-        var results = new VegetationScatterRecipeGenerationResult[prepared.Length];
-        for (int index = 0; index < prepared.Length; index++)
-        {
-            PreparedRecipe item = prepared[index];
-            CookedVegetationClusterArtifact artifact = VegetationClusterAssetCooker.Cook(
-                assetDatabase,
-                item.Bake.Cluster);
-            VegetationInstancePageCookDescriptor page = LoadSinglePage(item.Bake.Cluster);
-            results[index] = new VegetationScatterRecipeGenerationResult(
-                item.Recipe.Guid,
-                item.Bake.Cluster.Guid,
-                Array.AsReadOnly(item.Bake.PageMetadata.Select(metadata => metadata.Guid).ToArray()),
-                artifact.InstanceCount,
-                page.Origin,
-                artifact.Bounds,
-                artifact);
-        }
-
-        return Array.AsReadOnly(results);
+        return results.AsReadOnly();
     }
 
     private static VegetationSpeciesAndBiomeClosure CookSpeciesAndBiome(
@@ -668,11 +654,194 @@ public static class VegetationScatterRecipeGenerator
         return output;
     }
 
-    private static void WriteGeneratedSources(PreparedRecipe prepared)
+    private static VegetationScatterRecipeGenerationResult? PublishPreparedRecipe(
+        IAssetDatabase assetDatabase,
+        IAssetSourceIndex sourceIndex,
+        PreparedRecipe prepared)
     {
-        Directory.CreateDirectory(prepared.OutputDirectory);
+        PreviousGeneratedClosure previous = CapturePreviousGeneratedClosure(
+            prepared.OutputDirectory);
+        using var transaction = GeneratedSourceTransaction.Stage(prepared);
+        try
+        {
+            transaction.Commit();
+            sourceIndex.RefreshSourceDirectory(
+                prepared.OutputDirectory,
+                prepared.Source.PackageId);
+            if (prepared.Bake.HasOutput)
+            {
+                ValidateGeneratedSources(assetDatabase, prepared);
+            }
+
+            IReadOnlyList<CookedAssetRecord> published;
+            if (!prepared.Bake.HasOutput)
+            {
+                assetDatabase.PublishCookedArtifactSet(
+                    Array.Empty<CookedArtifactSetEntry>(),
+                    previous.CookedIdentities);
+                transaction.Accept();
+                return null;
+            }
+
+            VegetationClusterCookPreparation preparation =
+                VegetationClusterAssetCooker.Prepare(
+                    assetDatabase,
+                    prepared.Bake.Cluster);
+            var entries = new List<CookedArtifactSetEntry>(
+                preparation.Pages.Count + 1);
+            for (int index = 0; index < preparation.Pages.Count; index++)
+            {
+                CookedVegetationInstancePage page = preparation.Pages[index];
+                byte[] payload = preparation.PagePayloads[index];
+                VegetationInstancePageAssetCooker.ValidatePublicationCompatibility(
+                    assetDatabase,
+                    page,
+                    payload);
+                entries.Add(new CookedArtifactSetEntry(
+                    page.Guid,
+                    VegetationAssetTypes.InstancePage,
+                    VegetationInstancePageAssetCooker.RuntimeVariant,
+                    VegetationInstancePageAssetCooker.CookedExtension,
+                    payload));
+            }
+
+            entries.Add(new CookedArtifactSetEntry(
+                preparation.Cluster.Guid,
+                VegetationAssetTypes.Cluster,
+                VegetationClusterAssetCooker.RuntimeVariant,
+                VegetationClusterAssetCooker.CookedExtension,
+                preparation.ClusterPayload));
+            Guid[] currentIds = entries.Select(entry => entry.Guid).ToArray();
+            HashSet<Guid> currentIdSet = currentIds.ToHashSet();
+            CookedAssetIdentity[] stale = previous.CookedIdentities
+                .Where(identity => !currentIdSet.Contains(identity.Guid))
+                .ToArray();
+            published = assetDatabase.PublishCookedArtifactSet(entries, stale);
+            transaction.Accept();
+
+            CookedAssetRecord clusterArtifact = published.Single(artifact =>
+                artifact.Guid == preparation.Cluster.Guid &&
+                string.Equals(
+                    artifact.Variant,
+                    VegetationClusterAssetCooker.RuntimeVariant,
+                    StringComparison.Ordinal));
+            return new VegetationScatterRecipeGenerationResult(
+                prepared.Recipe.Guid,
+                preparation.Cluster.Guid,
+                Array.AsReadOnly(preparation.Cluster.Pages.Select(page => page.Guid).ToArray()),
+                preparation.Cluster.InstanceCount,
+                preparation.Pages[0].Origin,
+                preparation.Cluster.Bounds,
+                new CookedVegetationClusterArtifact(
+                    preparation.Cluster.Guid,
+                    preparation.Cluster.PackageId,
+                    VegetationClusterAssetCooker.RuntimeVariant,
+                    clusterArtifact.Path,
+                    preparation.Cluster.Pages.Count,
+                    preparation.Cluster.InstanceCount,
+                    preparation.Cluster.Bounds,
+                    clusterArtifact.SizeInBytes,
+                    Array.AsReadOnly(
+                        VegetationClusterAssetCooker.BuildDependencies(preparation.Cluster))));
+        }
+        catch (Exception publicationError)
+        {
+            var rollbackErrors = new List<Exception>();
+            try
+            {
+                transaction.Rollback();
+            }
+            catch (Exception rollbackError)
+            {
+                rollbackErrors.Add(rollbackError);
+            }
+
+            try
+            {
+                sourceIndex.RefreshSourceDirectory(
+                    prepared.OutputDirectory,
+                    prepared.Source.PackageId);
+            }
+            catch (Exception refreshError)
+            {
+                rollbackErrors.Add(refreshError);
+            }
+
+            if (rollbackErrors.Count > 0)
+            {
+                rollbackErrors.Insert(0, publicationError);
+                throw new AggregateException(
+                    "[VegetationScatterRecipeGenerator] Generated source/cooked publication failed " +
+                    "and rollback was incomplete.",
+                    rollbackErrors);
+            }
+
+            throw new InvalidOperationException(
+                "[VegetationScatterRecipeGenerator] Generated source/cooked publication failed.",
+                publicationError);
+        }
+    }
+
+    private static PreviousGeneratedClosure CapturePreviousGeneratedClosure(
+        string outputDirectory)
+    {
+        if (!Directory.Exists(outputDirectory))
+        {
+            return PreviousGeneratedClosure.Empty;
+        }
+
+        var identities = new List<CookedAssetIdentity>();
+        foreach (string path in Directory.EnumerateFiles(
+                     outputDirectory,
+                     "*" + GeneratedSourceExtension,
+                     SearchOption.TopDirectoryOnly)
+                     .Order(StringComparer.OrdinalIgnoreCase))
+        {
+            string metadataPath = path + ".meta";
+            if (!File.Exists(metadataPath))
+            {
+                throw new InvalidDataException(
+                    $"[VegetationScatterRecipeGenerator] Generated source '{path}' has no metadata.");
+            }
+
+            AssetMetadata metadata =
+                ArisenEngine.Core.Serialization.SerializationUtil.Deserialize<AssetMetadata>(
+                    metadataPath,
+                    serializeIfNotExist: false);
+            if (metadata.Generated == null ||
+                (metadata.Generated.ChildKind != VegetationScatterIdentity.ClusterChildKind &&
+                 metadata.Generated.ChildKind != VegetationScatterIdentity.PageChildKind))
+            {
+                continue;
+            }
+
+            string? variant = metadata.AssetType switch
+            {
+                VegetationAssetTypes.Cluster => VegetationClusterAssetCooker.RuntimeVariant,
+                VegetationAssetTypes.InstancePage => VegetationInstancePageAssetCooker.RuntimeVariant,
+                _ => null
+            };
+            if (variant == null)
+            {
+                continue;
+            }
+
+            identities.Add(new CookedAssetIdentity(metadata.Guid, variant));
+        }
+
+        return new PreviousGeneratedClosure(
+            identities
+                .Distinct()
+                .OrderBy(identity => identity.Guid)
+                .ThenBy(identity => identity.Variant, StringComparer.Ordinal)
+                .ToArray());
+    }
+
+    private static void WriteGeneratedSources(PreparedRecipe prepared, string outputDirectory)
+    {
+        Directory.CreateDirectory(outputDirectory);
         WriteGeneratedSource(
-            Path.Combine(prepared.OutputDirectory, "cluster" + GeneratedSourceExtension),
+            Path.Combine(outputDirectory, "cluster" + GeneratedSourceExtension),
             prepared.Recipe.Guid,
             prepared.Bake.ClusterMetadata,
             prepared.Bake.PlacementContentHash,
@@ -681,11 +850,11 @@ public static class VegetationScatterRecipeGenerator
         {
             WriteGeneratedSource(
                 Path.Combine(
-                    prepared.OutputDirectory,
+                    outputDirectory,
                     $"page-{index:D4}{GeneratedSourceExtension}"),
                 prepared.Recipe.Guid,
                 prepared.Bake.PageMetadata[index],
-                prepared.Bake.PlacementContentHash,
+                prepared.Bake.PageContentHashes[index],
                 index);
         }
     }
@@ -776,24 +945,235 @@ public static class VegetationScatterRecipeGenerator
         }
     }
 
-    private static VegetationInstancePageCookDescriptor LoadSinglePage(
-        VegetationClusterCookDescriptor cluster)
-    {
-        if (cluster.Pages.Count != 1)
-        {
-            throw new InvalidOperationException(
-                $"[VegetationScatterRecipeGenerator] Cluster '{cluster.Guid:D}' must contain exactly " +
-                "one generated page in scatter schema 1.");
-        }
-
-        return cluster.Pages[0];
-    }
-
     private sealed record PreparedRecipe(
         AssetRecord Source,
         VegetationScatterRecipeDescriptor Recipe,
         VegetationScatterBakeResult Bake,
         string OutputDirectory);
+
+    private sealed record PreviousGeneratedClosure(
+        IReadOnlyList<CookedAssetIdentity> CookedIdentities)
+    {
+        public static PreviousGeneratedClosure Empty { get; } = new(Array.Empty<CookedAssetIdentity>());
+    }
+
+    private sealed class GeneratedSourceTransaction : IDisposable
+    {
+        private readonly string m_OutputDirectory;
+        private readonly string m_TransactionRoot;
+        private readonly string m_StagedDirectory;
+        private readonly string m_BackupDirectory;
+        private readonly List<(string Original, string Backup)> m_Backups = new();
+        private readonly List<string> m_Installed = new();
+        private bool m_Committed;
+        private bool m_Accepted;
+        private bool m_RolledBack;
+
+        private GeneratedSourceTransaction(
+            string outputDirectory,
+            string transactionRoot,
+            string stagedDirectory,
+            string backupDirectory)
+        {
+            m_OutputDirectory = outputDirectory;
+            m_TransactionRoot = transactionRoot;
+            m_StagedDirectory = stagedDirectory;
+            m_BackupDirectory = backupDirectory;
+        }
+
+        public static GeneratedSourceTransaction Stage(PreparedRecipe prepared)
+        {
+            string outputDirectory = Path.GetFullPath(prepared.OutputDirectory);
+            string parent = Path.GetDirectoryName(outputDirectory) ??
+                throw new InvalidOperationException(
+                    "[VegetationScatterRecipeGenerator] Generated output has no parent directory.");
+            string transactionRoot = Path.Combine(
+                parent,
+                ".scatter-" + prepared.Recipe.Guid.ToString("N") + "-" +
+                Guid.NewGuid().ToString("N"));
+            string stagedDirectory = Path.Combine(transactionRoot, "staged");
+            string backupDirectory = Path.Combine(transactionRoot, "backup");
+            Directory.CreateDirectory(stagedDirectory);
+            if (prepared.Bake.HasOutput)
+            {
+                VegetationScatterRecipeGenerator.WriteGeneratedSources(
+                    prepared,
+                    stagedDirectory);
+            }
+            return new GeneratedSourceTransaction(
+                outputDirectory,
+                transactionRoot,
+                stagedDirectory,
+                backupDirectory);
+        }
+
+        public void Commit()
+        {
+            if (m_Committed)
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(m_OutputDirectory);
+                var affected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (Directory.Exists(m_OutputDirectory))
+                {
+                    foreach (string path in Directory.EnumerateFiles(
+                                 m_OutputDirectory,
+                                 "*" + GeneratedSourceExtension,
+                                 SearchOption.TopDirectoryOnly))
+                    {
+                        affected.Add(Path.GetFullPath(path));
+                        affected.Add(Path.GetFullPath(path + ".meta"));
+                    }
+                }
+
+                foreach (string staged in Directory.EnumerateFiles(
+                             m_StagedDirectory,
+                             "*",
+                             SearchOption.TopDirectoryOnly))
+                {
+                    affected.Add(Path.Combine(
+                        m_OutputDirectory,
+                        Path.GetFileName(staged)));
+                }
+
+                foreach (string target in affected.Order(StringComparer.OrdinalIgnoreCase))
+                {
+                    if (!File.Exists(target))
+                    {
+                        continue;
+                    }
+
+                    string relative = Path.GetFileName(target);
+                    string backup = Path.Combine(m_BackupDirectory, relative);
+                    Directory.CreateDirectory(m_BackupDirectory);
+                    File.Move(target, backup);
+                    m_Backups.Add((target, backup));
+                }
+
+                foreach (string staged in Directory.EnumerateFiles(
+                             m_StagedDirectory,
+                             "*",
+                             SearchOption.TopDirectoryOnly)
+                             .Order(StringComparer.OrdinalIgnoreCase))
+                {
+                    string target = Path.Combine(
+                        m_OutputDirectory,
+                        Path.GetFileName(staged));
+                    File.Move(staged, target);
+                    m_Installed.Add(target);
+                }
+
+                m_Committed = true;
+            }
+            catch
+            {
+                Rollback();
+                throw;
+            }
+        }
+
+        public void Accept()
+        {
+            m_Accepted = true;
+            m_Backups.Clear();
+            m_Installed.Clear();
+            TryDeleteDirectory(m_TransactionRoot);
+        }
+
+        public void Rollback()
+        {
+            if (m_RolledBack)
+            {
+                return;
+            }
+
+            m_RolledBack = true;
+            if (!m_Committed && m_Backups.Count == 0 && m_Installed.Count == 0)
+            {
+                TryDeleteDirectory(m_TransactionRoot);
+                return;
+            }
+
+            var errors = new List<Exception>();
+            for (int index = m_Installed.Count - 1; index >= 0; index--)
+            {
+                try
+                {
+                    if (File.Exists(m_Installed[index]))
+                    {
+                        File.Delete(m_Installed[index]);
+                    }
+                }
+                catch (Exception error)
+                {
+                    errors.Add(error);
+                }
+            }
+
+            for (int index = m_Backups.Count - 1; index >= 0; index--)
+            {
+                (string original, string backup) = m_Backups[index];
+                if (!File.Exists(backup))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(original)!);
+                    File.Move(backup, original, overwrite: true);
+                }
+                catch (Exception error)
+                {
+                    errors.Add(error);
+                }
+            }
+
+            m_Installed.Clear();
+            m_Backups.Clear();
+            TryDeleteDirectory(m_TransactionRoot);
+            if (errors.Count > 0)
+            {
+                throw new AggregateException(
+                    "[VegetationScatterRecipeGenerator] Generated source rollback failed.",
+                    errors);
+            }
+        }
+
+        public void Dispose()
+        {
+            if (!m_Accepted)
+            {
+                Rollback();
+            }
+            else
+            {
+                TryDeleteDirectory(m_TransactionRoot);
+            }
+        }
+
+        private static void TryDeleteDirectory(string path)
+        {
+            if (!Directory.Exists(path))
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.Delete(path, recursive: true);
+            }
+            catch
+            {
+                // A committed transaction can leave only its private staging/backup
+                // directory behind; source and registry publication are already complete.
+            }
+        }
+    }
 
     private readonly record struct VegetationSpeciesAndBiomeClosure(
         Guid BiomeGuid,

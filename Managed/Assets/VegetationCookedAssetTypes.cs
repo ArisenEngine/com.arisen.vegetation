@@ -139,7 +139,8 @@ public sealed record VegetationClusterCookDescriptor(
     string PackageId,
     int GeneratedSchemaVersion,
     CookedVegetationBiomeReference Biome,
-    IReadOnlyList<VegetationInstancePageCookDescriptor> Pages);
+    IReadOnlyList<VegetationInstancePageCookDescriptor> Pages,
+    IReadOnlyList<CookedVegetationSpecies>? SpeciesData = null);
 
 public sealed record CookedVegetationSpeciesLod(
     CookedVegetationMeshReference Mesh,
@@ -192,6 +193,18 @@ public readonly record struct CookedVegetationInstance(
     float UniformScale,
     float ConservativeRadius);
 
+public sealed record CookedVegetationSpeciesInstanceRange(
+    uint SpeciesIndex,
+    int FirstInstanceIndex,
+    int LastInstanceIndex,
+    int InstanceCount,
+    WorldBounds Bounds,
+    float MaximumConservativeRadius);
+
+public sealed record CookedVegetationInstancePageAcceleration(
+    WorldBounds Bounds,
+    IReadOnlyList<CookedVegetationSpeciesInstanceRange> SpeciesRanges);
+
 public sealed record CookedVegetationInstancePage(
     Guid Guid,
     Guid ClusterGuid,
@@ -200,7 +213,10 @@ public sealed record CookedVegetationInstancePage(
     WorldPosition Origin,
     WorldBounds Bounds,
     IReadOnlyList<CookedVegetationSpeciesReference> Species,
-    IReadOnlyList<CookedVegetationInstance> Instances);
+    IReadOnlyList<CookedVegetationInstance> Instances)
+{
+    public CookedVegetationInstancePageAcceleration? Acceleration { get; init; }
+}
 
 public sealed record CookedVegetationInstancePageReference(
     Guid Guid,
@@ -211,6 +227,32 @@ public sealed record CookedVegetationInstancePageReference(
     long SizeInBytes,
     byte[] ContentHash);
 
+public readonly record struct CookedVegetationSpatialNode(
+    WorldBounds Bounds,
+    int LeftChildIndex,
+    int RightChildIndex,
+    int FirstPageIndex,
+    int PageCount)
+{
+    public bool IsLeaf => LeftChildIndex < 0 && RightChildIndex < 0;
+}
+
+public sealed record CookedVegetationSpeciesAcceleration(
+    CookedVegetationSpeciesReference Species,
+    int FirstPageIndex,
+    int LastPageIndex,
+    int PageCount,
+    int InstanceCount,
+    WorldBounds Bounds,
+    float MaximumConservativeRadius,
+    float MaximumLodDistance,
+    float MaximumLodScreenError);
+
+public sealed record CookedVegetationClusterAcceleration(
+    WorldBounds Bounds,
+    IReadOnlyList<CookedVegetationSpatialNode> SpatialNodes,
+    IReadOnlyList<CookedVegetationSpeciesAcceleration> Species);
+
 public sealed record CookedVegetationCluster(
     Guid Guid,
     string PackageId,
@@ -219,4 +261,7 @@ public sealed record CookedVegetationCluster(
     WorldBounds Bounds,
     IReadOnlyList<CookedVegetationSpeciesReference> Species,
     IReadOnlyList<CookedVegetationInstancePageReference> Pages,
-    int InstanceCount);
+    int InstanceCount)
+{
+    public CookedVegetationClusterAcceleration? Acceleration { get; init; }
+}

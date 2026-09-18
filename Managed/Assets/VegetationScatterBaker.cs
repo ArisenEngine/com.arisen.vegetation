@@ -64,12 +64,94 @@ public readonly record struct VegetationScatterBakeMetrics(
     int OwnershipRejectedCount,
     int AcceptedCount);
 
-public sealed record VegetationScatterBakeResult(
-    VegetationClusterCookDescriptor Cluster,
-    AssetMetadata ClusterMetadata,
-    IReadOnlyList<AssetMetadata> PageMetadata,
-    byte[] PlacementContentHash,
-    VegetationScatterBakeMetrics Metrics);
+public enum VegetationScatterBakeDisposition
+{
+    NoOutput = 0,
+    Output = 1
+}
+
+public sealed record VegetationScatterBakeResult
+{
+    private readonly VegetationClusterCookDescriptor? m_Cluster;
+
+    private VegetationScatterBakeResult(
+        VegetationScatterBakeDisposition disposition,
+        VegetationClusterCookDescriptor? cluster,
+        AssetMetadata clusterMetadata,
+        IReadOnlyList<AssetMetadata> pageMetadata,
+        IReadOnlyList<byte[]> pageContentHashes,
+        byte[] placementContentHash,
+        VegetationScatterBakeMetrics metrics)
+    {
+        if ((disposition == VegetationScatterBakeDisposition.Output) != (cluster != null))
+        {
+            throw new ArgumentException(
+                "Vegetation scatter bake disposition does not match cluster output.",
+                nameof(disposition));
+        }
+
+        Disposition = disposition;
+        m_Cluster = cluster;
+        ClusterMetadata = clusterMetadata ?? throw new ArgumentNullException(nameof(clusterMetadata));
+        PageMetadata = pageMetadata ?? throw new ArgumentNullException(nameof(pageMetadata));
+        PageContentHashes = pageContentHashes ??
+            throw new ArgumentNullException(nameof(pageContentHashes));
+        if (PageMetadata.Count != PageContentHashes.Count)
+        {
+            throw new ArgumentException(
+                "Vegetation scatter page metadata and content-hash counts must match.",
+                nameof(pageContentHashes));
+        }
+        PlacementContentHash = placementContentHash ??
+            throw new ArgumentNullException(nameof(placementContentHash));
+        Metrics = metrics;
+    }
+
+    public VegetationScatterBakeDisposition Disposition { get; }
+
+    public VegetationClusterCookDescriptor Cluster => m_Cluster ??
+        throw new InvalidOperationException(
+            "A no-output vegetation scatter plan does not contain a cluster descriptor.");
+
+    public AssetMetadata ClusterMetadata { get; }
+
+    public IReadOnlyList<AssetMetadata> PageMetadata { get; }
+
+    public IReadOnlyList<byte[]> PageContentHashes { get; }
+
+    public byte[] PlacementContentHash { get; }
+
+    public VegetationScatterBakeMetrics Metrics { get; }
+
+    public bool HasOutput => Disposition == VegetationScatterBakeDisposition.Output;
+
+    public static VegetationScatterBakeResult CreateOutput(
+        VegetationClusterCookDescriptor cluster,
+        AssetMetadata clusterMetadata,
+        IReadOnlyList<AssetMetadata> pageMetadata,
+        IReadOnlyList<byte[]> pageContentHashes,
+        byte[] placementContentHash,
+        VegetationScatterBakeMetrics metrics) => new(
+            VegetationScatterBakeDisposition.Output,
+            cluster ?? throw new ArgumentNullException(nameof(cluster)),
+            clusterMetadata,
+            pageMetadata,
+            pageContentHashes,
+            placementContentHash,
+            metrics);
+
+    public static VegetationScatterBakeResult CreateNoOutput(
+        AssetMetadata clusterMetadata,
+        byte[] placementContentHash,
+        VegetationScatterBakeMetrics metrics) => new(
+            VegetationScatterBakeDisposition.NoOutput,
+            null,
+            clusterMetadata ?? throw new ArgumentNullException(nameof(clusterMetadata)),
+            Array.Empty<AssetMetadata>(),
+            Array.Empty<byte[]>(),
+            placementContentHash ?? throw new ArgumentNullException(nameof(placementContentHash)),
+            metrics);
+}
 
 public static class VegetationScatterIdentity
 {
@@ -533,9 +615,18 @@ public static class VegetationScatterBaker
             }
         }
 
-        int acceptedLimit = Math.Min(
-            entry.ClusterSize,
-            VegetationInstancePageAssetCooker.MaximumInstanceCount);
+        string packageId = descriptor.Biome.PackageId;
+        AssetMetadata clusterMetadata = VegetationScatterIdentity.CreateClusterMetadata(
+            descriptor.Biome.Guid,
+            packageId,
+            descriptor.WorldGuid,
+            descriptor.TerrainRoot.Guid,
+            descriptor.TerrainRoot.PackageId,
+            descriptor.Species.Guid,
+            descriptor.Species.PackageId,
+            entry.EntryId,
+            descriptor.Cell);
+        int acceptedLimit = VegetationClusterAssetCooker.MaximumTotalInstanceCount;
         int[] acceptedIndices = ApplySpacing(
             descriptor,
             entry,
@@ -548,7 +639,23 @@ public static class VegetationScatterBaker
             out int ownershipRejected);
         if (acceptedCount == 0)
         {
-            throw Invalid(descriptor, "produced no accepted terrain-backed instances");
+            var metrics = new VegetationScatterBakeMetrics(
+                candidateRange.MaximumCandidateCount,
+                densityRejected,
+                terrainRejected,
+                ruleRejected,
+                exclusionRejected,
+                spacingRejected,
+                ownershipRejected,
+                acceptedCount);
+            return VegetationScatterBakeResult.CreateNoOutput(
+                clusterMetadata,
+                ComputePlacementContentHash(
+                    descriptor,
+                    entry,
+                    pageOrigin,
+                    Array.Empty<VegetationCookedInstanceInput>()),
+                metrics);
         }
 
         VegetationCookedInstanceInput[] instances = BuildInstances(
@@ -562,32 +669,59 @@ public static class VegetationScatterBaker
             entry,
             pageOrigin,
             instances);
-        string packageId = descriptor.Biome.PackageId;
-        AssetMetadata clusterMetadata = VegetationScatterIdentity.CreateClusterMetadata(
-            descriptor.Biome.Guid,
-            packageId,
-            descriptor.WorldGuid,
-            descriptor.TerrainRoot.Guid,
-            descriptor.TerrainRoot.PackageId,
-            descriptor.Species.Guid,
-            descriptor.Species.PackageId,
-            entry.EntryId,
-            descriptor.Cell);
-        AssetMetadata pageMetadata = VegetationScatterIdentity.CreatePageMetadata(
-            clusterMetadata.Guid,
-            packageId,
-            pageIndex: 0,
-            placementHash);
-        var pageDescriptor = new VegetationInstancePageCookDescriptor(
-            pageMetadata.Guid,
-            clusterMetadata.Guid,
-            packageId,
-            CurrentGeneratedSchemaVersion,
-            pageOrigin,
-            [new CookedVegetationSpeciesReference(
-                descriptor.Species.Guid,
-                descriptor.Species.PackageId)],
-            Array.AsReadOnly(instances));
+        if (instances.Length > VegetationClusterAssetCooker.MaximumTotalInstanceCount)
+        {
+            throw Invalid(
+                descriptor,
+                $"accepted instance count '{instances.Length}' exceeds the cluster limit " +
+                $"'{VegetationClusterAssetCooker.MaximumTotalInstanceCount}'");
+        }
+
+        int pageCapacity = Math.Min(
+            entry.ClusterSize,
+            VegetationInstancePageAssetCooker.MaximumInstanceCount);
+        int pageCount = checked((instances.Length + pageCapacity - 1) / pageCapacity);
+        if (pageCount > VegetationClusterAssetCooker.MaximumPageCount)
+        {
+            throw Invalid(
+                descriptor,
+                $"accepted instance count '{instances.Length}' requires page count '{pageCount}', " +
+                $"exceeding the cluster limit '{VegetationClusterAssetCooker.MaximumPageCount}'");
+        }
+
+        var pages = new VegetationInstancePageCookDescriptor[pageCount];
+        var pageMetadata = new AssetMetadata[pageCount];
+        var pageContentHashes = new byte[pageCount][];
+        for (int pageIndex = 0; pageIndex < pageCount; pageIndex++)
+        {
+            int pageStart = checked(pageIndex * pageCapacity);
+            int pageLength = Math.Min(pageCapacity, instances.Length - pageStart);
+            var pageInstances = new VegetationCookedInstanceInput[pageLength];
+            Array.Copy(instances, pageStart, pageInstances, 0, pageLength);
+            byte[] pageHash = ComputePlacementContentHash(
+                descriptor,
+                entry,
+                pageOrigin,
+                pageInstances);
+            AssetMetadata metadata = VegetationScatterIdentity.CreatePageMetadata(
+                clusterMetadata.Guid,
+                packageId,
+                pageIndex,
+                pageHash);
+            pageMetadata[pageIndex] = metadata;
+            pageContentHashes[pageIndex] = pageHash;
+            pages[pageIndex] = new VegetationInstancePageCookDescriptor(
+                metadata.Guid,
+                clusterMetadata.Guid,
+                packageId,
+                CurrentGeneratedSchemaVersion,
+                pageOrigin,
+                [new CookedVegetationSpeciesReference(
+                    descriptor.Species.Guid,
+                    descriptor.Species.PackageId)],
+                Array.AsReadOnly(pageInstances));
+        }
+
         var clusterDescriptor = new VegetationClusterCookDescriptor(
             clusterMetadata.Guid,
             packageId,
@@ -595,11 +729,13 @@ public static class VegetationScatterBaker
             new CookedVegetationBiomeReference(
                 descriptor.Biome.Guid,
                 descriptor.Biome.PackageId),
-            [pageDescriptor]);
-        return new VegetationScatterBakeResult(
+            Array.AsReadOnly(pages),
+            [descriptor.Species]);
+        return VegetationScatterBakeResult.CreateOutput(
             clusterDescriptor,
             clusterMetadata,
-            [pageMetadata],
+            Array.AsReadOnly(pageMetadata),
+            Array.AsReadOnly(pageContentHashes),
             placementHash,
             new VegetationScatterBakeMetrics(
                 candidateRange.MaximumCandidateCount,
@@ -1105,7 +1241,7 @@ public static class VegetationScatterBaker
                 {
                     throw Invalid(
                         descriptor,
-                        $"accepted instance count '{acceptedCount + 1}' exceeds the one-page limit " +
+                        $"accepted instance count '{acceptedCount + 1}' exceeds the cluster limit " +
                         $"'{acceptedLimit}' for entry '{entry.EntryId}'");
                 }
 
