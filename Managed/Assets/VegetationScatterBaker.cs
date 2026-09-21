@@ -951,7 +951,9 @@ public static class VegetationScatterBaker
                 $"[VegetationScatterBaker] Entry '{entry.EntryId}' or its cooked species identity is invalid.");
         }
 
-        double maximumRadius = (double)unscaledConservativeRadius * species.ScaleRange.Maximum;
+        double maximumRadius = InflateRadiusForWind(
+            (float)((double)unscaledConservativeRadius * species.ScaleRange.Maximum),
+            species.WindResponse);
         if (!double.IsFinite(maximumRadius) || maximumRadius > float.MaxValue)
         {
             throw new InvalidOperationException(
@@ -1263,6 +1265,16 @@ public static class VegetationScatterBaker
             CheckedFloor((position.X - region.MinimumX) / bucketSize),
             CheckedFloor((position.Z - region.MinimumZ) / bucketSize));
 
+    /// <summary>
+    /// Instance bounds have to stay conservative while the species leans in the wind. The shader
+    /// displaces a vertex by at most (worst-case lean x its height above the instance origin), and
+    /// a conservative radius already bounds every vertex distance and therefore that height, so
+    /// inflating the authored radius by the species' worst-case lean keeps culling and shadow
+    /// fitting valid for every reachable wind configuration without re-reading the wind at runtime.
+    /// </summary>
+    internal static float InflateRadiusForWind(float conservativeRadius, float windResponse) =>
+        conservativeRadius * (1.0f + VegetationWindSettings.MaximumBendFraction(windResponse));
+
     private static VegetationCookedInstanceInput[] BuildInstances(
         VegetationScatterBakeDescriptor descriptor,
         CookedVegetationSpecies species,
@@ -1284,8 +1296,9 @@ public static class VegetationScatterBaker
             float tilt = DegreesToRadians(Lerp(species.TiltRangeDegrees, evaluation.TiltRank));
             Quaternion orientation = Quaternion.Normalize(
                 Quaternion.CreateFromYawPitchRoll(yaw, tilt, 0.0f));
-            float conservativeRadius = (float)(
-                (double)descriptor.UnscaledConservativeRadius * scale);
+            float conservativeRadius = InflateRadiusForWind(
+                (float)((double)descriptor.UnscaledConservativeRadius * scale),
+                species.WindResponse);
             if (!float.IsFinite(scale) || scale <= 0.0f ||
                 !float.IsFinite(conservativeRadius) || conservativeRadius <= 0.0f ||
                 !IsFinite(orientation))
