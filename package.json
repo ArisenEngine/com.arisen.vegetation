@@ -17,7 +17,8 @@
       "ArisenEngine.Vegetation.IVegetationQueryService",
       "ArisenEngine.Vegetation.IVegetationDiagnostics",
       "ArisenEngine.Vegetation.IVegetationDiagnosticsPublisher",
-      "ArisenEngine.Vegetation.IVegetationAuthoringPreviewService"
+      "ArisenEngine.Vegetation.IVegetationAuthoringPreviewService",
+      "ArisenEngine.Vegetation.IVegetationWindSource"
     ],
     "requires": [
       "ArisenEngine.Core.Assets.IAssetDatabase",

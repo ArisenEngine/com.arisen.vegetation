@@ -20,6 +20,7 @@ public sealed class VegetationPackage : IPackageEntry
     private VegetationQueryService? m_QueryService;
     private VegetationDiagnosticsService? m_Diagnostics;
     private VegetationAuthoringPreviewService? m_AuthoringPreviews;
+    private VegetationWindService? m_Wind;
     private bool m_RuntimeAssetCookerRegistered;
     private bool m_SceneComponentRegistered;
 
@@ -34,6 +35,7 @@ public sealed class VegetationPackage : IPackageEntry
         m_QueryService != null ||
         m_Diagnostics != null ||
         m_AuthoringPreviews != null ||
+        m_Wind != null ||
         m_RuntimeAssetCookerRegistered ||
         m_SceneComponentRegistered;
 
@@ -74,6 +76,7 @@ public sealed class VegetationPackage : IPackageEntry
             entityManagerProvider);
         m_Diagnostics = new VegetationDiagnosticsService();
         m_AuthoringPreviews = new VegetationAuthoringPreviewService();
+        m_Wind = new VegetationWindService();
         m_RuntimeAssetCookerRegistered = false;
         m_SceneComponentRegistered = false;
 
@@ -91,6 +94,8 @@ public sealed class VegetationPackage : IPackageEntry
             services.RegisterService<IVegetationDiagnostics>(m_Diagnostics);
             services.RegisterService<IVegetationDiagnosticsPublisher>(m_Diagnostics);
             services.RegisterService<IVegetationAuthoringPreviewService>(m_AuthoringPreviews);
+            services.RegisterService<IVegetationWindSource>(m_Wind);
+            services.RegisterService<IVegetationWindClockControl>(m_Wind);
             KernelLog.Info("[Vegetation] Runtime package loaded.");
         }
         catch (Exception loadError)
@@ -149,6 +154,15 @@ public sealed class VegetationPackage : IPackageEntry
         {
             m_SceneComponentCodec = null;
             m_SceneComponentRegistry = null;
+        }
+
+        if (m_Wind != null)
+        {
+            AttemptCleanup(
+                "wind clear",
+                m_Wind.Clear,
+                () => m_Wind = null,
+                failures);
         }
 
         if (m_AuthoringPreviews != null)
