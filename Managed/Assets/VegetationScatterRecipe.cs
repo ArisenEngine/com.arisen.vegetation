@@ -29,7 +29,10 @@ public sealed record VegetationScatterRecipeGenerationResult(
     int InstanceCount,
     WorldPosition Origin,
     WorldBounds Bounds,
-    CookedVegetationClusterArtifact Artifact);
+    CookedVegetationClusterArtifact Artifact,
+    VegetationScatterRecipeDescriptor Recipe,
+    string ClusterPackageId,
+    AssetRef<VegetationSpeciesSourceAsset> Species);
 
 public static class VegetationScatterRecipeSourceAssetLoader
 {
@@ -591,7 +594,7 @@ public static class VegetationScatterRecipeGenerator
                 }
             }
 
-            prepared.Add(new PreparedRecipe(source, recipe, bake, outputDirectory));
+            prepared.Add(new PreparedRecipe(source, recipe, bake, closure, outputDirectory));
         }
 
         var results = new List<VegetationScatterRecipeGenerationResult>(prepared.Count);
@@ -622,7 +625,7 @@ public static class VegetationScatterRecipeGenerator
                 $"'{biome.Guid:D}' has no entry '{recipe.EntryId}'.");
         VegetationSpeciesAssetCooker.Cook(assetDatabase, entry.Species);
         VegetationBiomeAssetCooker.Cook(assetDatabase, recipe.Biome);
-        return new VegetationSpeciesAndBiomeClosure(biome.Guid, entry.Species.Guid);
+        return new VegetationSpeciesAndBiomeClosure(biome.Guid, entry.Species.Guid, entry.Species);
     }
 
     private static string GetGeneratedDirectory(AssetRecord source)
@@ -742,7 +745,10 @@ public static class VegetationScatterRecipeGenerator
                     preparation.Cluster.Bounds,
                     clusterArtifact.SizeInBytes,
                     Array.AsReadOnly(
-                        VegetationClusterAssetCooker.BuildDependencies(preparation.Cluster))));
+                        VegetationClusterAssetCooker.BuildDependencies(preparation.Cluster))),
+                prepared.Recipe,
+                preparation.Cluster.PackageId,
+                prepared.Closure.Species);
         }
         catch (Exception publicationError)
         {
@@ -949,6 +955,7 @@ public static class VegetationScatterRecipeGenerator
         AssetRecord Source,
         VegetationScatterRecipeDescriptor Recipe,
         VegetationScatterBakeResult Bake,
+        VegetationSpeciesAndBiomeClosure Closure,
         string OutputDirectory);
 
     private sealed record PreviousGeneratedClosure(
@@ -1177,7 +1184,8 @@ public static class VegetationScatterRecipeGenerator
 
     private readonly record struct VegetationSpeciesAndBiomeClosure(
         Guid BiomeGuid,
-        Guid SpeciesGuid);
+        Guid SpeciesGuid,
+        AssetRef<VegetationSpeciesSourceAsset> Species);
 }
 
 internal sealed class VegetationScatterRecipeSourceDocument

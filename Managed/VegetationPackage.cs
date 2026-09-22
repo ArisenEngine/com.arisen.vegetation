@@ -57,9 +57,11 @@ public sealed class VegetationPackage : IPackageEntry
 
         if (assetDatabase.SourceAccessMode == AssetSourceAccessMode.RuntimeAssetCook)
         {
-            VegetationScatterRecipeGenerator.GenerateAll(
-                assetDatabase,
-                services.GetService<IAssetSourceIndex>());
+            IReadOnlyList<VegetationScatterRecipeGenerationResult> generated =
+                VegetationScatterRecipeGenerator.GenerateAll(
+                    assetDatabase,
+                    services.GetService<IAssetSourceIndex>());
+            VegetationScatterRecipeReport.Write(assetDatabase, generated);
         }
 
         m_RuntimeAssetCooker = new VegetationRuntimeAssetCooker(assetDatabase);
