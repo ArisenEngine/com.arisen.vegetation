@@ -541,8 +541,15 @@ public static class VegetationScatterRecipeGenerator
         var prepared = new List<PreparedRecipe>(sources.Length);
         var generatedGuids = new HashSet<Guid>();
         var generatedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Recipe generation is the longest part of mounting a cook, and it used to be completely
+        // silent: it is reported per recipe so a workspace build shows it is alive while it runs.
+        long generationStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        RuntimeAssetCookConsole.InfoFormat(
+            "[VegetationScatterRecipeGenerator] Generating {0} scatter recipe(s).",
+            sources.Length);
         for (int index = 0; index < sources.Length; index++)
         {
+            long recipeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
             AssetRecord source = sources[index];
             VegetationScatterRecipeDescriptor recipe =
                 VegetationScatterRecipeSourceAssetLoader.LoadSource(
@@ -595,6 +602,14 @@ public static class VegetationScatterRecipeGenerator
             }
 
             prepared.Add(new PreparedRecipe(source, recipe, bake, closure, outputDirectory));
+            RuntimeAssetCookConsole.InfoFormat(
+                "[VegetationScatterRecipeGenerator] Prepared recipe {0}/{1} '{2:D}' in {3:N1} s " +
+                "({4:N1} s total).",
+                index + 1,
+                sources.Length,
+                recipe.Guid,
+                System.Diagnostics.Stopwatch.GetElapsedTime(recipeStarted).TotalSeconds,
+                System.Diagnostics.Stopwatch.GetElapsedTime(generationStarted).TotalSeconds);
         }
 
         var results = new List<VegetationScatterRecipeGenerationResult>(prepared.Count);
@@ -609,6 +624,11 @@ public static class VegetationScatterRecipeGenerator
         }
 
         PruneUnreachableGeneratedDirectories(sourceIndex, prepared);
+        RuntimeAssetCookConsole.InfoFormat(
+            "[VegetationScatterRecipeGenerator] Generated {0} recipe(s) and {1} cluster(s) in {2:N1} s.",
+            prepared.Count,
+            results.Count,
+            System.Diagnostics.Stopwatch.GetElapsedTime(generationStarted).TotalSeconds);
         return results.AsReadOnly();
     }
 
