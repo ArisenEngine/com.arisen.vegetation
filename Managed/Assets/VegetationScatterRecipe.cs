@@ -547,6 +547,9 @@ public static class VegetationScatterRecipeGenerator
         RuntimeAssetCookConsole.InfoFormat(
             "[VegetationScatterRecipeGenerator] Generating {0} scatter recipe(s).",
             sources.Length);
+        // Every recipe of a world bakes from the same baked root and its tiles, so those inputs are
+        // resolved once per root for this pass instead of once per recipe.
+        var terrainInputs = new Dictionary<Guid, PinnedTerrainInputs>();
         for (int index = 0; index < sources.Length; index++)
         {
             long recipeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -559,6 +562,14 @@ public static class VegetationScatterRecipeGenerator
                         VegetationAssetTypes.ScatterRecipe,
                         source.PackageId));
             TerrainRootAssetCooker.Cook(assetDatabase, recipe.TerrainRoot);
+            if (!terrainInputs.TryGetValue(recipe.TerrainRoot.Guid, out PinnedTerrainInputs? pinned))
+            {
+                pinned = VegetationScatterBaker.ResolvePinnedTerrainInputs(
+                    assetDatabase,
+                    recipe.TerrainRoot);
+                terrainInputs.Add(recipe.TerrainRoot.Guid, pinned);
+            }
+
             VegetationSpeciesAndBiomeClosure closure = CookSpeciesAndBiome(assetDatabase, recipe);
             VegetationScatterBakeResult bake = VegetationScatterBaker.Build(
                 assetDatabase,
@@ -570,7 +581,8 @@ public static class VegetationScatterRecipeGenerator
                     recipe.Cell,
                     recipe.EntryId,
                     recipe.UnscaledConservativeRadius,
-                    recipe.Exclusions));
+                    recipe.Exclusions),
+                pinned);
             string outputDirectory = GetGeneratedDirectory(source);
             if (!generatedDirectories.Add(outputDirectory))
             {

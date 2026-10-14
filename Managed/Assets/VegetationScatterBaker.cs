@@ -64,6 +64,14 @@ public readonly record struct VegetationScatterBakeMetrics(
     int OwnershipRejectedCount,
     int AcceptedCount);
 
+/// <summary>
+/// A baked terrain root together with its tiles, already loaded and hash-pinned against the cooked
+/// root. Resolving this once lets every recipe of a world bake from the same inputs.
+/// </summary>
+internal sealed record PinnedTerrainInputs(
+    CookedTerrainRoot Root,
+    IReadOnlyList<CookedTerrainTile> Tiles);
+
 public enum VegetationScatterBakeDisposition
 {
     NoOutput = 0,
@@ -458,6 +466,43 @@ public static class VegetationScatterBaker
     {
         ArgumentNullException.ThrowIfNull(assetDatabase);
         ArgumentNullException.ThrowIfNull(request);
+        return Build(
+            assetDatabase,
+            request,
+            ResolvePinnedTerrainInputs(assetDatabase, request.TerrainRoot));
+    }
+
+    /// <summary>
+    /// Resolves the baked root and its pinned tiles once. A pass that bakes many recipes against one
+    /// root then loads and hash-pins that root's tiles once instead of once per recipe, which used to
+    /// re-read and re-parse every tile payload for every recipe of the world.
+    /// </summary>
+    internal static PinnedTerrainInputs ResolvePinnedTerrainInputs(
+        IAssetDatabase assetDatabase,
+        AssetRef<TerrainRootSourceAsset> terrainRootRef)
+    {
+        if (!TerrainRootAssetCooker.TryLoadCooked(
+                assetDatabase,
+                terrainRootRef,
+                out CookedTerrainRoot terrainRoot,
+                out string terrainDiagnostic))
+        {
+            throw new InvalidOperationException(terrainDiagnostic);
+        }
+
+        return new PinnedTerrainInputs(
+            terrainRoot,
+            LoadPinnedTerrainTiles(assetDatabase, terrainRoot));
+    }
+
+    internal static VegetationScatterBakeResult Build(
+        IAssetDatabase assetDatabase,
+        VegetationScatterCookRequest request,
+        PinnedTerrainInputs terrainInputs)
+    {
+        ArgumentNullException.ThrowIfNull(assetDatabase);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(terrainInputs);
         ArgumentNullException.ThrowIfNull(request.Partition);
         ArgumentNullException.ThrowIfNull(request.Exclusions);
         _ = VegetationScatterIdentity.RequireEntryId(request.EntryId);
@@ -480,22 +525,12 @@ public static class VegetationScatterBaker
             throw new InvalidOperationException(speciesDiagnostic);
         }
 
-        if (!TerrainRootAssetCooker.TryLoadCooked(
-                assetDatabase,
-                request.TerrainRoot,
-                out CookedTerrainRoot terrainRoot,
-                out string terrainDiagnostic))
-        {
-            throw new InvalidOperationException(terrainDiagnostic);
-        }
-
-        CookedTerrainTile[] tiles = LoadPinnedTerrainTiles(assetDatabase, terrainRoot);
         return Build(new VegetationScatterBakeDescriptor(
             request.WorldGuid,
             biome,
             species,
-            terrainRoot,
-            tiles,
+            terrainInputs.Root,
+            terrainInputs.Tiles,
             request.Partition,
             request.Cell,
             request.EntryId,
