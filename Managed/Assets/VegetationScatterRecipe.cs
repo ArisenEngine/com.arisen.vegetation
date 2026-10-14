@@ -608,6 +608,7 @@ public static class VegetationScatterRecipeGenerator
             }
         }
 
+        PruneUnreachableGeneratedDirectories(sourceIndex, prepared);
         return results.AsReadOnly();
     }
 
@@ -842,6 +843,91 @@ public static class VegetationScatterRecipeGenerator
                 .ThenBy(identity => identity.Variant, StringComparer.Ordinal)
                 .ToArray());
     }
+
+    // A recipe publishes into "<recipe folder>/Generated/<recipe GUID>". The recipe GUID is derived
+    // from the owning package id, so re-keying a recipe publishes a new directory beside the previous
+    // one. The previous directory is then unreachable: every loader rejects a generated identity whose
+    // recorded owner disagrees with the asset's current owner, so nothing can ever load out of it
+    // again. The generator owns this directory convention, so it also has to state the matching
+    // invariant - a recipe folder's Generated directory holds only sources owned by that package - and
+    // remove the directories it can prove it no longer owns. Leaving them behind would keep the
+    // package carrying a second, unreachable copy of every page it has ever baked.
+    private static void PruneUnreachableGeneratedDirectories(
+        IAssetSourceIndex sourceIndex,
+        List<PreparedRecipe> prepared)
+    {
+        var liveDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var ownersByRoot = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (PreparedRecipe item in prepared)
+        {
+            string output = TrimDirectorySeparators(Path.GetFullPath(item.OutputDirectory));
+            liveDirectories.Add(output);
+            string? root = Path.GetDirectoryName(output);
+            if (root != null)
+            {
+                ownersByRoot[Path.GetFullPath(root)] = item.Source.PackageId;
+            }
+        }
+
+        foreach (KeyValuePair<string, string> root in ownersByRoot
+                     .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            if (!Directory.Exists(root.Key))
+            {
+                continue;
+            }
+
+            foreach (string directory in Directory.EnumerateDirectories(root.Key)
+                         .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+            {
+                string candidate = TrimDirectorySeparators(Path.GetFullPath(directory));
+                if (liveDirectories.Contains(candidate) ||
+                    !IsOwnedByAnotherPackage(candidate, root.Value))
+                {
+                    continue;
+                }
+
+                Directory.Delete(candidate, recursive: true);
+                sourceIndex.RefreshSourceDirectory(candidate, root.Value);
+            }
+        }
+    }
+
+    // Only a directory whose every generated source records a different owner is safe to remove.
+    // A directory with no generated provenance at all belongs to somebody else, and a mixed one is
+    // treated as live because the generator cannot prove otherwise.
+    private static bool IsOwnedByAnotherPackage(string directory, string packageId)
+    {
+        bool sawGeneratedSource = false;
+        foreach (string path in Directory.EnumerateFiles(
+                     directory,
+                     "*" + GeneratedSourceExtension + ".meta",
+                     SearchOption.TopDirectoryOnly))
+        {
+            AssetMetadata metadata =
+                ArisenEngine.Core.Serialization.SerializationUtil.Deserialize<AssetMetadata>(
+                    path,
+                    serializeIfNotExist: false);
+            if (metadata.Generated == null)
+            {
+                continue;
+            }
+
+            sawGeneratedSource = true;
+            if (string.Equals(
+                    metadata.Generated.SourcePackageId,
+                    packageId,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return sawGeneratedSource;
+    }
+
+    private static string TrimDirectorySeparators(string path) =>
+        path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
     private static void WriteGeneratedSources(PreparedRecipe prepared, string outputDirectory)
     {
