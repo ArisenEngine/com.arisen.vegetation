@@ -1175,7 +1175,18 @@ public static class VegetationScatterRecipeGenerator
                     string relative = Path.GetFileName(target);
                     string backup = Path.Combine(m_BackupDirectory, relative);
                     Directory.CreateDirectory(m_BackupDirectory);
-                    File.Move(target, backup);
+                    try
+                    {
+                        File.Move(target, backup);
+                    }
+                    catch (IOException exception)
+                    {
+                        throw new IOException(
+                            $"[VegetationScatterRecipeGenerator] Could not move the previous generated source " +
+                            $"'{target}' aside for republishing: {exception.Message}",
+                            exception);
+                    }
+
                     m_Backups.Add((target, backup));
                 }
 
@@ -1188,7 +1199,18 @@ public static class VegetationScatterRecipeGenerator
                     string target = Path.Combine(
                         m_OutputDirectory,
                         Path.GetFileName(staged));
-                    File.Move(staged, target);
+                    try
+                    {
+                        File.Move(staged, target);
+                    }
+                    catch (IOException exception)
+                    {
+                        throw new IOException(
+                            $"[VegetationScatterRecipeGenerator] Could not publish staged generated source " +
+                            $"'{target}': {exception.Message}",
+                            exception);
+                    }
+
                     m_Installed.Add(target);
                 }
 
